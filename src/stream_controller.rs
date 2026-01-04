@@ -1,0 +1,82 @@
+use crate::stream_state::{AtomicStreamState, StreamState};
+use crate::device_management::default_output_device;
+use crate::channel_router::duplicate_mono_to_stereo;
+use crate::buffer_size_adapter::{BufferSizeAdapter, MAX_HOST_FRAMES};
+use crate::error_recovery::handle_process_error;
+use auxide::rt::Runtime;
+use cpal::{Stream, SampleFormat};
+use cpal::traits::{DeviceTrait, StreamTrait};
+use crate::device_management::DeviceExt;
+use std::sync::Arc;
+use anyhow::Result;
+
+pub struct StreamController {
+    stream: Option<Stream>,
+    state: Arc<AtomicStreamState>,
+}
+
+impl StreamController {
+    pub fn play(mut runtime: Runtime) -> Result<Self> {
+        let device = default_output_device()?;
+        let sample_rate = 44100; // Assume, since runtime.sample_rate is private
+        let config = device.supported_configs()?.into_iter().find(|c| c.sample_rate().0 == sample_rate && c.channels() == 2).ok_or_else(|| anyhow::anyhow!("No suitable config"))?;
+        let sample_format = config.sample_format();
+        let config = config.config();
+
+        let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
+        let state_clone = state.clone();
+        let mut adapter = BufferSizeAdapter::new(runtime.plan.block_size);
+
+        let stream = match sample_format {
+            SampleFormat::F32 => device.build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if data.len() > MAX_HOST_FRAMES {
+                        handle_process_error(data);
+                        return;
+                    }
+                    match state_clone.get_state() {
+                        StreamState::Running => {
+                            if let Err(_) = adapter.fill_host_buffer(data, &mut runtime, 2) {
+                                handle_process_error(data);
+                            }
+                        }
+                        _ => {
+                            data.fill(0.0);
+                        }
+                    }
+                },
+                |err| eprintln!("Stream error: {}", err),
+                None,
+            )?,
+            _ => return Err(anyhow::anyhow!("Unsupported sample format")),
+        };
+
+        Ok(Self {
+            stream: Some(stream),
+            state,
+        })
+    }
+
+    pub fn start(&self) -> Result<()> {
+        if let Some(stream) = &self.stream {
+            stream.play()?;
+            self.state.set_state(StreamState::Running);
+        }
+        Ok(())
+    }
+
+    pub fn stop(&self) {
+        if let Some(stream) = &self.stream {
+            let _ = stream.pause();
+        }
+        self.state.set_state(StreamState::Stopped);
+    }
+
+    pub fn pause(&self) {
+        if let Some(stream) = &self.stream {
+            let _ = stream.pause();
+        }
+        self.state.set_state(StreamState::Paused);
+    }
+}
