@@ -88,6 +88,8 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
+> **💡 Complex Graphs**: This works with any Auxide graph! Try the [Auxide examples](https://github.com/Michael-A-Kuykendall/auxide/tree/master/examples) like AM synthesis, filter chains, or sequencers—just replace the offline `runtime.process_block()` calls with `StreamController::play()`.
+
 ## Architecture
 
 Auxide IO's components:
@@ -106,7 +108,10 @@ See CONTRIBUTING.md. Auxide IO follows the same rules as Auxide: high standards,
 ## Learn More
 
 - **[Auxide Core](https://github.com/Michael-A-Kuykendall/auxide)**: Build complex DSP graphs, custom nodes, and audio processing chains
-- **Examples**: Check `examples/` for playback demos
+- **Examples**: 
+  - `play_sine.rs` - Basic sine wave playback
+  - `play_tone.rs` - Interactive tone player  
+  - `mixer.rs` - Mixing two oscillators for chords
 - **Documentation**: Full API docs on [docs.rs](https://docs.rs/auxide-io)
 
 ## License

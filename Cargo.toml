@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Real-time safe audio I/O layer for auxide DSP graphs using CPAL"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/Michael-A-Kuykendall/auxide-io"
+keywords = ["audio", "real-time", "cpal", "streaming", "dsp"]
+categories = ["multimedia::audio", "api-bindings"]
 
 [dependencies]
 auxide = "0.1.2"
@@ -20,6 +23,10 @@ path = "examples/play_tone.rs"
 [[example]]
 name = "play_sine"
 path = "examples/play_sine.rs"
+
+[[example]]
+name = "mixer"
+path = "examples/mixer.rs"
 
 [profile.release]
 panic = "abort"
