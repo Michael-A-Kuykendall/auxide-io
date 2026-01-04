@@ -2,7 +2,7 @@
 name = "auxide-io"
 version = "0.1.0"
 edition = "2021"
-description = "Real-time safe audio I/O layer for auxide DSP graphs using CPAL"
+description = "High-performance, real-time safe audio I/O layer for Auxide DSP graphs. Bridges deterministic audio processing to hardware output with buffer adaptation, channel routing, and cross-platform streaming via CPAL."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Michael-A-Kuykendall/auxide-io"
 keywords = ["audio", "real-time", "cpal", "streaming", "dsp"]
