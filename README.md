@@ -10,6 +10,17 @@
 **Real-time audio I/O layer for Auxide.**  
 Stream Auxide's audio graphs to speakers with CPAL, featuring buffer size adaptation, channel routing, and RT-safe operation.
 
+## The Auxide Audio Stack
+
+Auxide IO is the **output layer** of the Auxide audio ecosystem:
+
+- **[Auxide](https://github.com/Michael-A-Kuykendall/auxide)**: RT-safe DSP graph kernel
+- **Auxide IO** (this crate): Hardware audio streaming and I/O
+
+Together, they provide a complete solution for real-time audio synthesis and processing in Rust.
+
+**🔗 [Get Auxide Core](https://github.com/Michael-A-Kuykendall/auxide) | [Crate](https://crates.io/crates/auxide) | [Docs](https://docs.rs/auxide)**
+
 ## What is Auxide IO?
 
 Auxide IO bridges the gap between Auxide's deterministic kernel and real-world audio output. It provides:
@@ -36,7 +47,8 @@ Auxide IO is open source but not open contribution. The project is maintained by
 
 ## Usage
 
-Add to your `Cargo.toml`:
+Auxide IO requires [Auxide](https://github.com/Michael-A-Kuykendall/auxide) for the DSP graph. Add both to your `Cargo.toml`:
+
 ```toml
 [dependencies]
 auxide = "0.1"
@@ -90,6 +102,12 @@ All operations are RT-safe: fixed-size buffers, atomic ops, no heap allocation i
 ## Contributing
 
 See CONTRIBUTING.md. Auxide IO follows the same rules as Auxide: high standards, RT safety first.
+
+## Learn More
+
+- **[Auxide Core](https://github.com/Michael-A-Kuykendall/auxide)**: Build complex DSP graphs, custom nodes, and audio processing chains
+- **Examples**: Check `examples/` for playback demos
+- **Documentation**: Full API docs on [docs.rs](https://docs.rs/auxide-io)
 
 ## License
 

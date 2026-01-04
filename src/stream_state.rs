@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU8, Ordering};
 use anyhow::Result;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

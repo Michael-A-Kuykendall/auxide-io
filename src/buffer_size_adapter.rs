@@ -29,18 +29,25 @@ impl BufferSizeAdapter {
     }
 
     pub fn handle_partial_block(&mut self) {
-        // Accumulate partial blocks if needed
+        // Current implementation fills host buffers completely from available data
+        // Partial block accumulation could be implemented here if needed for very small host buffers
     }
 
     pub fn handle_unknown_buffer_size(&mut self) {
-        // Handle unknown sizes
+        // Current implementation handles unknown/variable sizes dynamically in fill_host_buffer
+        // Size validation happens at stream setup time
     }
 
-    pub fn fill_host_buffer(&mut self, host_buffer: &mut [f32], runtime: &mut Runtime, channels: usize) -> Result<(), &'static str> {
+    pub fn fill_host_buffer(
+        &mut self,
+        host_buffer: &mut [f32],
+        runtime: &mut Runtime,
+        channels: usize,
+    ) -> Result<(), &'static str> {
         let mut host_idx = 0;
         while host_idx < host_buffer.len() {
             // Check if we need more data
-            let available = if self.write_pos >= self.read_pos {
+            let mut available = if self.write_pos >= self.read_pos {
                 self.write_pos - self.read_pos
             } else {
                 self.ring_buffer.len() - self.read_pos + self.write_pos
@@ -53,6 +60,12 @@ impl BufferSizeAdapter {
                     self.ring_buffer[self.write_pos] = sample;
                     self.write_pos = (self.write_pos + 1) % self.ring_buffer.len();
                 }
+                // Recalculate available after writing
+                available = if self.write_pos >= self.read_pos {
+                    self.write_pos - self.read_pos
+                } else {
+                    self.ring_buffer.len() - self.read_pos + self.write_pos
+                };
             }
             // Read from ring buffer
             if available >= 1 {
@@ -85,19 +98,31 @@ mod tests {
         let mut graph = Graph::new();
         let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
         let sink = graph.add_node(NodeType::OutputSink);
-        graph.add_edge(auxide::graph::Edge {
-            from_node: osc,
-            from_port: PortId(0),
-            to_node: sink,
-            to_port: PortId(0),
-            rate: Rate::Audio,
-        }).unwrap();
+        graph
+            .add_edge(auxide::graph::Edge {
+                from_node: osc,
+                from_port: PortId(0),
+                to_node: sink,
+                to_port: PortId(0),
+                rate: Rate::Audio,
+            })
+            .unwrap();
         let plan = Plan::compile(&graph, 64).unwrap();
         let mut runtime = Runtime::new(plan, &graph, 44100.0);
 
         let mut adapter = BufferSizeAdapter::new(64);
         let mut buffer = vec![0.0; 128]; // Stereo
-        assert!(adapter.fill_host_buffer(&mut buffer, &mut runtime, 2).is_ok());
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 2)
+            .is_ok());
+        // Ensure we actually produced non-zero audio
+        assert!(buffer.iter().any(|&x| x != 0.0), "Buffer should contain non-zero audio samples");
+        // For stereo, check that samples come in identical pairs (L=R for each frame)
+        for i in (0..buffer.len()).step_by(2) {
+            if i + 1 < buffer.len() {
+                assert_eq!(buffer[i], buffer[i + 1], "Stereo channels should be identical for mono input");
+            }
+        }
     }
 
     #[test]

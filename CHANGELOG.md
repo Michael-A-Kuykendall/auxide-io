@@ -1,19 +1,14 @@
 # Changelog
 
-## [0.1.1] - 2026-01-03
-- **Bug fixes**: Improved error handling in `render_offline` to propagate `process_block` errors instead of panicking.
-- **API enhancement**: Added `get_node_by_name` getter to `GraphBuilder` for accessing named nodes.
-- **Invariant clarity**: Updated cycle detection assertion message for better readability in PPT mode.
-- **Maintenance**: Minor code polish and documentation updates.
-
 ## [0.1.0] - 2026-01-03
-- Initial release of the audio graph kernel.
-- Core architecture: Graph → Plan → Runtime.
-- RT-safe block processing with no allocs/locks in hot paths.
-- Deterministic execution.
-- Invariants: single-writer, no cycles, rate compatibility.
-- Minimal DSP nodes: SineOsc, Gain, Mix, OutputSink.
-- Comprehensive tests and benchmarks.
-- PPT (Predictive Property-Based Testing) system with runtime invariant logging and contract tests.
-- **Correctness hardening**: Reject invalid block sizes, enforce edge directions, bounds checks, phase wrapping.
+- **Initial release** of auxide-io, the RT-safe audio I/O layer for Auxide.
+- **CPAL integration**: Cross-platform audio streaming with hardware device enumeration.
+- **Buffer adaptation**: Ring buffer system handles size mismatches between Auxide's fixed blocks (512 samples) and variable host buffers (up to 16384 samples).
+- **Channel routing**: Mono-to-stereo duplication with bit-exact copying.
+- **RT safety**: No allocations, locks, or I/O in audio callbacks. Atomic state management only.
+- **Error recovery**: Graceful failure with silence on stream errors, no panics in RT path.
+- **Stream control**: Start/stop/pause audio streams with thread-safe atomic state.
+- **Lock-free verification**: Platform atomic support checking at initialization.
+- **Examples**: `play_tone.rs` and `play_sine.rs` demonstrate real-time audio output.
+- **Comprehensive testing**: Unit tests cover all components, fuzz testing for buffer adaptation.
 <parameter name="filePath">c:/Users/micha/repos/auxide/CHANGELOG.md

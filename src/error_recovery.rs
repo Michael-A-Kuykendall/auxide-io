@@ -3,8 +3,8 @@ pub fn handle_process_error(out: &mut [f32]) {
 }
 
 pub fn handle_device_error() {
-    // Stop the stream - this would be called from the stream controller
-    // For now, placeholder
+    // Device errors are handled by setting atomic flags in StreamController
+    // This function is kept for API consistency but is not directly called
 }
 
 #[cfg(test)]

@@ -10,16 +10,18 @@ fn main() -> anyhow::Result<()> {
     let mut graph = Graph::new();
     let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
     let sink = graph.add_node(NodeType::OutputSink);
-    graph.add_edge(auxide::graph::Edge {
-        from_node: osc,
-        from_port: PortId(0),
-        to_node: sink,
-        to_port: PortId(0),
-        rate: Rate::Audio,
-    }).unwrap();
+    graph
+        .add_edge(auxide::graph::Edge {
+            from_node: osc,
+            from_port: PortId(0),
+            to_node: sink,
+            to_port: PortId(0),
+            rate: Rate::Audio,
+        })
+        .unwrap();
 
     let plan = Plan::compile(&graph, 512).unwrap();
-    let runtime = Runtime::new(plan, &graph, 44100.0);
+    let runtime = Runtime::new(plan, &graph, 192000.0);
 
     // Create and start the stream
     let controller = StreamController::play(runtime)?;
