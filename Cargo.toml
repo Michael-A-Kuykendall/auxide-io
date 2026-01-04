@@ -2,6 +2,8 @@
 name = "auxide-io"
 version = "0.1.0"
 edition = "2021"
+description = "Real-time safe audio I/O layer for auxide DSP graphs using CPAL"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 auxide = "0.1.2"
