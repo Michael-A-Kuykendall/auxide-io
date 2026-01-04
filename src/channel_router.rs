@@ -6,12 +6,8 @@ pub fn duplicate_mono_to_stereo(src: &[f32], left: &mut [f32], right: &mut [f32]
 }
 
 pub fn duplicate_mono_to_channels(src: &[f32], dst_channels: &mut [&mut [f32]]) {
-    for &s in src.iter() {
-        for channel in dst_channels.iter_mut() {
-            for sample in channel.iter_mut() {
-                *sample = s;
-            }
-        }
+    for channel in dst_channels {
+        channel.copy_from_slice(src);
     }
 }
 

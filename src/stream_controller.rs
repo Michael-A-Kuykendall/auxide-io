@@ -1,6 +1,5 @@
 use crate::stream_state::{AtomicStreamState, StreamState};
 use crate::device_management::default_output_device;
-use crate::channel_router::duplicate_mono_to_stereo;
 use crate::buffer_size_adapter::{BufferSizeAdapter, MAX_HOST_FRAMES};
 use crate::error_recovery::handle_process_error;
 use auxide::rt::Runtime;
@@ -17,9 +16,10 @@ pub struct StreamController {
 
 impl StreamController {
     pub fn play(mut runtime: Runtime) -> Result<Self> {
+        AtomicStreamState::verify_lock_free_atomics()?;
         let device = default_output_device()?;
-        let sample_rate = 44100; // Assume, since runtime.sample_rate is private
-        let config = device.supported_configs()?.into_iter().find(|c| c.sample_rate().0 == sample_rate && c.channels() == 2).ok_or_else(|| anyhow::anyhow!("No suitable config"))?;
+        let sample_rate = runtime.sample_rate() as u32;
+        let config = device.supported_configs()?.into_iter().find(|c| c.sample_rate().0 == sample_rate && c.channels() == 2 && c.sample_format() == SampleFormat::F32).ok_or_else(|| anyhow::anyhow!("No suitable config"))?;
         let sample_format = config.sample_format();
         let config = config.config();
 
@@ -46,7 +46,9 @@ impl StreamController {
                         }
                     }
                 },
-                |err| eprintln!("Stream error: {}", err),
+                |_| {
+                    // TODO: Log error atomically or set flag
+                },
                 None,
             )?,
             _ => return Err(anyhow::anyhow!("Unsupported sample format")),

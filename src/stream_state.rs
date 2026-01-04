@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU8, Ordering};
+use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -20,24 +21,26 @@ impl AtomicStreamState {
     }
 
     pub fn set_state(&self, state: StreamState) {
-        self.state.store(state as u8, Ordering::SeqCst);
+        self.state.store(state as u8, Ordering::Release);
     }
 
     pub fn get_state(&self) -> StreamState {
-        match self.state.load(Ordering::SeqCst) {
+        match self.state.load(Ordering::Acquire) {
             0 => StreamState::Running,
             1 => StreamState::Paused,
             2 => StreamState::Stopped,
-            _ => panic!("Invalid state"),
+            _ => StreamState::Stopped, // Default to stopped on invalid
         }
     }
 
-    pub fn verify_lock_free_atomics() -> Result<(), &'static str> {
-        if true {
-            Ok(())
-        } else {
-            Err("AtomicU8 is not lock-free on this platform")
-        }
+    pub fn verify_lock_free_atomics() -> Result<()> {
+        #[cfg(not(target_has_atomic = "8"))]
+        return Err(anyhow::anyhow!("AtomicU8 not supported on this platform"));
+        #[cfg(not(target_has_atomic = "32"))]
+        return Err(anyhow::anyhow!("AtomicU32 not supported on this platform"));
+        #[cfg(not(target_has_atomic = "64"))]
+        return Err(anyhow::anyhow!("AtomicU64 not supported on this platform"));
+        Ok(())
     }
 }
 
