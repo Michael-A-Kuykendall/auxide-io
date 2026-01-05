@@ -48,6 +48,8 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "auxide"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fab1911c696c0478ed72d31f3d5b4d81af7bf5d6f623037a75f02673aaa474fb"
 dependencies = [
  "hound",
  "lazy_static",
