@@ -91,10 +91,6 @@ impl StreamController {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    callback_count += 1;
-                    if callback_count % 100 == 0 {
-                        println!("Audio callback #{}", callback_count);
-                    }
                     if data.len() > MAX_HOST_FRAMES {
                         handle_process_error(data);
                         return;
