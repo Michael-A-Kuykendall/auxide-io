@@ -17,10 +17,55 @@ pub struct StreamController {
 }
 
 impl StreamController {
+    /// Get the best available sample rate for audio output
+    pub fn get_best_sample_rate(requested_rate: f32) -> Result<f32> {
+        let device = default_output_device()?;
+        let requested_sample_rate = requested_rate as u32;
+        
+        let supported_configs: Vec<_> = device.supported_configs()?.into_iter().collect();
+        
+        // First try to find exact match
+        if let Some(config) = supported_configs
+            .iter()
+            .find(|c| {
+                c.sample_rate().0 == requested_sample_rate
+                    && c.channels() == 2
+                    && c.sample_format() == SampleFormat::F32
+            }) {
+            return Ok(config.sample_rate().0 as f32);
+        }
+        
+        // Find best alternative
+        if let Some(config) = supported_configs
+            .iter()
+            .filter(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
+            .min_by_key(|c| {
+                let rate = c.sample_rate().0;
+                if rate >= requested_sample_rate {
+                    rate - requested_sample_rate
+                } else {
+                    requested_sample_rate - rate
+                }
+            }) {
+            return Ok(config.sample_rate().0 as f32);
+        }
+        
+        // Fallback to any F32 config
+        if let Some(config) = supported_configs
+            .iter()
+            .find(|c| c.sample_format() == SampleFormat::F32) {
+            return Ok(config.sample_rate().0 as f32);
+        }
+        
+        Err(anyhow::anyhow!("No suitable audio configuration found"))
+    }
+
     pub fn play(mut runtime: Runtime) -> Result<Self> {
         AtomicStreamState::verify_lock_free_atomics()?;
         let device = default_output_device()?;
         let sample_rate = runtime.sample_rate() as u32;
+        
+        // Find a supported configuration that matches our runtime's sample rate
         let config = device
             .supported_configs()?
             .into_iter()
@@ -29,7 +74,8 @@ impl StreamController {
                     && c.channels() == 2
                     && c.sample_format() == SampleFormat::F32
             })
-            .ok_or_else(|| anyhow::anyhow!("No suitable config"))?;
+            .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
+            
         let sample_format = config.sample_format();
         let config = config.config();
 
@@ -40,10 +86,15 @@ impl StreamController {
         let error_flag_clone2 = error_flag.clone();
         let mut adapter = BufferSizeAdapter::new(runtime.plan.block_size);
 
+        let mut callback_count = 0u64;
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    callback_count += 1;
+                    if callback_count % 100 == 0 {
+                        println!("Audio callback #{}", callback_count);
+                    }
                     if data.len() > MAX_HOST_FRAMES {
                         handle_process_error(data);
                         return;

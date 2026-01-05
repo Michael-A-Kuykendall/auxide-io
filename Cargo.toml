@@ -9,7 +9,7 @@ keywords = ["audio", "real-time", "cpal", "streaming", "dsp", "rt-safe", "low-la
 categories = ["multimedia::audio", "api-bindings"]
 
 [dependencies]
-auxide = "0.1.2"
+auxide = "0.2"
 cpal = "0.15"
 anyhow = "1.0"
 
