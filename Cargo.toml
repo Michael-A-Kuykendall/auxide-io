@@ -1,6 +1,6 @@
 [package]
 name = "auxide-io"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 description = "High-performance, real-time safe audio I/O layer for Auxide DSP graphs. Bridges deterministic audio processing to hardware output with buffer adaptation, channel routing, and cross-platform streaming via CPAL."
 license = "MIT"

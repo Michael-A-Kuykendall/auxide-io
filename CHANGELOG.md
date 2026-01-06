@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.1.1] - 2026-01-05
+## [0.2.0] - 2026-01-05
+- **RT-safety fix** - Removed RT-unsafe println! from audio callback path
+- **Auxide 0.3.0 compatibility** - Updated for compatibility with latest auxide kernel changes
+- **Improved error handling** - Enhanced error recovery and state management
+- **Example improvements** - Renamed mixer.rs to audio_mixer.rs for clarity
+
+## [0.1.1] - 2026-01-03
 - **RT-safety fix** - Removed RT-unsafe println! from audio callback path
 - **Auxide 0.2.0 compatibility** - Updated for compatibility with latest auxide kernel changes
 - **Improved error handling** - Enhanced error recovery and state management
