@@ -16,3 +16,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# Tarballs
+*.tar.gz

@@ -130,4 +130,61 @@ mod tests {
         let mut adapter = BufferSizeAdapter::new(64);
         assert!(adapter.adapt_to_host_buffer(MAX_HOST_FRAMES + 1).is_err());
     }
+
+    #[test]
+    fn test_small_host_buffer() {
+        let mut graph = Graph::new();
+        let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+        let sink = graph.add_node(NodeType::OutputSink);
+        graph
+            .add_edge(auxide::graph::Edge {
+                from_node: osc,
+                from_port: PortId(0),
+                to_node: sink,
+                to_port: PortId(0),
+                rate: Rate::Audio,
+            })
+            .unwrap();
+        let plan = Plan::compile(&graph, 64).unwrap();
+        let mut runtime = Runtime::new(plan, &graph, 44100.0);
+
+        let mut adapter = BufferSizeAdapter::new(64);
+        let mut buffer = vec![0.0; 2]; // Very small buffer
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 1)
+            .is_ok());
+        assert!(buffer.iter().any(|&x| x != 0.0));
+    }
+
+    #[test]
+    fn test_large_host_buffer() {
+        let mut graph = Graph::new();
+        let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+        let sink = graph.add_node(NodeType::OutputSink);
+        graph
+            .add_edge(auxide::graph::Edge {
+                from_node: osc,
+                from_port: PortId(0),
+                to_node: sink,
+                to_port: PortId(0),
+                rate: Rate::Audio,
+            })
+            .unwrap();
+        let plan = Plan::compile(&graph, 64).unwrap();
+        let mut runtime = Runtime::new(plan, &graph, 44100.0);
+
+        let mut adapter = BufferSizeAdapter::new(64);
+        let mut buffer = vec![0.0; 1024]; // Larger buffer
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 1)
+            .is_ok());
+        assert!(buffer.iter().any(|&x| x != 0.0));
+    }
+
+    #[test]
+    fn test_validate_oversized_buffer() {
+        let mut adapter = BufferSizeAdapter::new(64);
+        assert!(adapter.adapt_to_host_buffer(MAX_HOST_FRAMES + 1).is_err());
+        assert!(adapter.adapt_to_host_buffer(1024).is_ok());
+    }
 }

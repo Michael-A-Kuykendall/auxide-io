@@ -42,6 +42,11 @@ impl AtomicStreamState {
         return Err(anyhow::anyhow!("AtomicU64 not supported on this platform"));
         Ok(())
     }
+
+    #[cfg(test)]
+    pub fn set_state_raw(&self, value: u8) {
+        self.state.store(value, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -70,5 +75,12 @@ mod tests {
     fn test_startup_atomic_check() {
         // Since we assume true, just call it
         assert!(AtomicStreamState::verify_lock_free_atomics().is_ok());
+    }
+
+    #[test]
+    fn test_invalid_state_defaults_to_stopped() {
+        let state = AtomicStreamState::new(StreamState::Stopped);
+        state.set_state_raw(99);
+        assert_eq!(state.get_state(), StreamState::Stopped);
     }
 }

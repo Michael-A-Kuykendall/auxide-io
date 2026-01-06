@@ -8,13 +8,14 @@ repository = "https://github.com/Michael-A-Kuykendall/auxide-io"
 keywords = ["audio", "real-time", "cpal", "streaming", "dsp"]
 categories = ["multimedia::audio", "api-bindings"]
 
-[dependencies]
-auxide = "0.2"
-cpal = "0.15"
-anyhow = "1.0"
-
 [features]
 jack = ["cpal/jack"]
+default = []
+
+[dependencies]
+auxide = { workspace = true }
+cpal = "0.15"
+anyhow = "1.0"
 
 [[example]]
 name = "play_tone"
@@ -25,8 +26,5 @@ name = "play_sine"
 path = "examples/play_sine.rs"
 
 [[example]]
-name = "mixer"
-path = "examples/mixer.rs"
-
-[profile.release]
-panic = "abort"
+name = "audio_mixer"
+path = "examples/audio_mixer.rs"

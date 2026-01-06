@@ -17,4 +17,10 @@ mod tests {
         handle_process_error(&mut out);
         assert_eq!(out, [0.0, 0.0, 0.0]);
     }
+
+    #[test]
+    fn test_handle_device_error() {
+        // Test that handle_device_error doesn't panic
+        handle_device_error();
+    }
 }

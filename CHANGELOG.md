@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.1] - 2026-01-05
+- **RT-safety fix** - Removed RT-unsafe println! from audio callback path
+- **Auxide 0.2.0 compatibility** - Updated for compatibility with latest auxide kernel changes
+- **Improved error handling** - Enhanced error recovery and state management
+
 ## [0.1.0] - 2026-01-03
 - **Initial release** of auxide-io, the RT-safe audio I/O layer for Auxide.
 - **CPAL integration**: Cross-platform audio streaming with hardware device enumeration.

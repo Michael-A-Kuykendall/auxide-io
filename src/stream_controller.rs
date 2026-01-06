@@ -41,11 +41,7 @@ impl StreamController {
             .filter(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
             .min_by_key(|c| {
                 let rate = c.sample_rate().0;
-                if rate >= requested_sample_rate {
-                    rate - requested_sample_rate
-                } else {
-                    requested_sample_rate - rate
-                }
+                rate.abs_diff(requested_sample_rate)
             }) {
             return Ok(config.sample_rate().0 as f32);
         }
@@ -86,7 +82,6 @@ impl StreamController {
         let error_flag_clone2 = error_flag.clone();
         let mut adapter = BufferSizeAdapter::new(runtime.plan.block_size);
 
-        let mut callback_count = 0u64;
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
@@ -149,6 +144,8 @@ impl StreamController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use auxide::graph::{Graph, NodeType, PortId, Rate};
+    use auxide::plan::Plan;
 
     #[test]
     fn test_error_flag() {
@@ -162,5 +159,65 @@ mod tests {
         assert!(error_flag.load(Ordering::Relaxed));
         error_flag.store(false, Ordering::Relaxed);
         assert!(!error_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_play_without_device() {
+        // Test that play fails gracefully when no audio device is available
+        let mut graph = Graph::new();
+        let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+        let sink = graph.add_node(NodeType::OutputSink);
+        graph
+            .add_edge(auxide::graph::Edge {
+                from_node: osc,
+                from_port: PortId(0),
+                to_node: sink,
+                to_port: PortId(0),
+                rate: Rate::Audio,
+            })
+            .unwrap();
+        let plan = Plan::compile(&graph, 64).unwrap();
+        let runtime = Runtime::new(plan, &graph, 44100.0);
+        
+        // This should fail in test environment (no audio device)
+        let result = StreamController::play(runtime);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_controller_methods_with_no_stream() {
+        // Test methods on a controller with no stream
+        let controller = StreamController {
+            stream: None,
+            state: Arc::new(AtomicStreamState::new(StreamState::Stopped)),
+            error_flag: Arc::new(AtomicBool::new(false)),
+        };
+
+        // start should not change state since no stream
+        assert_eq!(controller.state.get_state(), StreamState::Stopped);
+        let _ = controller.start();
+        assert_eq!(controller.state.get_state(), StreamState::Stopped);
+
+        // stop should set state to Stopped
+        controller.state.set_state(StreamState::Running);
+        controller.stop();
+        assert_eq!(controller.state.get_state(), StreamState::Stopped);
+
+        // error flag tests
+        assert!(!controller.has_error());
+        controller.error_flag.store(true, Ordering::Relaxed);
+        assert!(controller.has_error());
+        controller.clear_error();
+        assert!(!controller.has_error());
+    }
+
+    #[test]
+    fn test_contract_stream_controller() {
+        // Contract test: ensure buffer size validation works correctly
+        let mut adapter = BufferSizeAdapter::new(64);
+        // Call with valid size
+        assert!(adapter.adapt_to_host_buffer(1024).is_ok());
+        // Call with oversized buffer - should fail
+        assert!(adapter.adapt_to_host_buffer(MAX_HOST_FRAMES + 1).is_err());
     }
 }
