@@ -32,31 +32,37 @@ fn main() -> anyhow::Result<()> {
     let sink = graph.add_node(NodeType::OutputSink);
 
     // Connect: osc1 -> mix (input 0)
-    graph.add_edge(auxide::graph::Edge {
-        from_node: osc1,
-        from_port: PortId(0),
-        to_node: mix,
-        to_port: PortId(0),
-        rate: Rate::Audio,
-    }).unwrap();
+    graph
+        .add_edge(auxide::graph::Edge {
+            from_node: osc1,
+            from_port: PortId(0),
+            to_node: mix,
+            to_port: PortId(0),
+            rate: Rate::Audio,
+        })
+        .unwrap();
 
     // Connect: osc2 -> mix (input 1)
-    graph.add_edge(auxide::graph::Edge {
-        from_node: osc2,
-        from_port: PortId(0),
-        to_node: mix,
-        to_port: PortId(1),
-        rate: Rate::Audio,
-    }).unwrap();
+    graph
+        .add_edge(auxide::graph::Edge {
+            from_node: osc2,
+            from_port: PortId(0),
+            to_node: mix,
+            to_port: PortId(1),
+            rate: Rate::Audio,
+        })
+        .unwrap();
 
     // Connect: mix -> output
-    graph.add_edge(auxide::graph::Edge {
-        from_node: mix,
-        from_port: PortId(0),
-        to_node: sink,
-        to_port: PortId(0),
-        rate: Rate::Audio,
-    }).unwrap();
+    graph
+        .add_edge(auxide::graph::Edge {
+            from_node: mix,
+            from_port: PortId(0),
+            to_node: sink,
+            to_port: PortId(0),
+            rate: Rate::Audio,
+        })
+        .unwrap();
 
     let plan = Plan::compile(&graph, 512).unwrap();
     let runtime = Runtime::new(plan, &graph, 44100.0);

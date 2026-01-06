@@ -116,11 +116,18 @@ mod tests {
             .fill_host_buffer(&mut buffer, &mut runtime, 2)
             .is_ok());
         // Ensure we actually produced non-zero audio
-        assert!(buffer.iter().any(|&x| x != 0.0), "Buffer should contain non-zero audio samples");
+        assert!(
+            buffer.iter().any(|&x| x != 0.0),
+            "Buffer should contain non-zero audio samples"
+        );
         // For stereo, check that samples come in identical pairs (L=R for each frame)
         for i in (0..buffer.len()).step_by(2) {
             if i + 1 < buffer.len() {
-                assert_eq!(buffer[i], buffer[i + 1], "Stereo channels should be identical for mono input");
+                assert_eq!(
+                    buffer[i],
+                    buffer[i + 1],
+                    "Stereo channels should be identical for mono input"
+                );
             }
         }
     }

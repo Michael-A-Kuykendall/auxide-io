@@ -7,8 +7,8 @@ use anyhow::Result;
 use auxide::rt::Runtime;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub struct StreamController {
     stream: Option<Stream>,
@@ -21,20 +21,18 @@ impl StreamController {
     pub fn get_best_sample_rate(requested_rate: f32) -> Result<f32> {
         let device = default_output_device()?;
         let requested_sample_rate = requested_rate as u32;
-        
+
         let supported_configs: Vec<_> = device.supported_configs()?.into_iter().collect();
-        
+
         // First try to find exact match
-        if let Some(config) = supported_configs
-            .iter()
-            .find(|c| {
-                c.sample_rate().0 == requested_sample_rate
-                    && c.channels() == 2
-                    && c.sample_format() == SampleFormat::F32
-            }) {
+        if let Some(config) = supported_configs.iter().find(|c| {
+            c.sample_rate().0 == requested_sample_rate
+                && c.channels() == 2
+                && c.sample_format() == SampleFormat::F32
+        }) {
             return Ok(config.sample_rate().0 as f32);
         }
-        
+
         // Find best alternative
         if let Some(config) = supported_configs
             .iter()
@@ -42,17 +40,19 @@ impl StreamController {
             .min_by_key(|c| {
                 let rate = c.sample_rate().0;
                 rate.abs_diff(requested_sample_rate)
-            }) {
+            })
+        {
             return Ok(config.sample_rate().0 as f32);
         }
-        
+
         // Fallback to any F32 config
         if let Some(config) = supported_configs
             .iter()
-            .find(|c| c.sample_format() == SampleFormat::F32) {
+            .find(|c| c.sample_format() == SampleFormat::F32)
+        {
             return Ok(config.sample_rate().0 as f32);
         }
-        
+
         Err(anyhow::anyhow!("No suitable audio configuration found"))
     }
 
@@ -60,7 +60,7 @@ impl StreamController {
         AtomicStreamState::verify_lock_free_atomics()?;
         let device = default_output_device()?;
         let sample_rate = runtime.sample_rate() as u32;
-        
+
         // Find a supported configuration that matches our runtime's sample rate
         let config = device
             .supported_configs()?
@@ -71,7 +71,7 @@ impl StreamController {
                     && c.sample_format() == SampleFormat::F32
             })
             .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
-            
+
         let sample_format = config.sample_format();
         let config = config.config();
 
@@ -152,7 +152,7 @@ mod tests {
         // Test error flag functionality (without creating actual streams)
         let _state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
-        
+
         // Simulate the error flag behavior
         assert!(!error_flag.load(Ordering::Relaxed));
         error_flag.store(true, Ordering::Relaxed);
@@ -178,7 +178,7 @@ mod tests {
             .unwrap();
         let plan = Plan::compile(&graph, 64).unwrap();
         let runtime = Runtime::new(plan, &graph, 44100.0);
-        
+
         // This should fail in test environment (no audio device)
         let result = StreamController::play(runtime);
         assert!(result.is_err());

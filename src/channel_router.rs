@@ -1,4 +1,8 @@
-pub fn duplicate_mono_to_stereo(src: &[f32], left: &mut [f32], right: &mut [f32]) -> Result<(), &'static str> {
+pub fn duplicate_mono_to_stereo(
+    src: &[f32],
+    left: &mut [f32],
+    right: &mut [f32],
+) -> Result<(), &'static str> {
     if left.len() != src.len() || right.len() != src.len() {
         return Err("Channel length mismatch");
     }
@@ -9,7 +13,10 @@ pub fn duplicate_mono_to_stereo(src: &[f32], left: &mut [f32], right: &mut [f32]
     Ok(())
 }
 
-pub fn duplicate_mono_to_channels(src: &[f32], dst_channels: &mut [&mut [f32]]) -> Result<(), &'static str> {
+pub fn duplicate_mono_to_channels(
+    src: &[f32],
+    dst_channels: &mut [&mut [f32]],
+) -> Result<(), &'static str> {
     for channel in dst_channels {
         if channel.len() != src.len() {
             return Err("Channel length mismatch");
