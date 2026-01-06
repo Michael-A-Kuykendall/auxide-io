@@ -103,5 +103,5 @@ MIT License - forever and always.
 |-------|-------------|---------|
 | [auxide](https://github.com/Michael-A-Kuykendall/auxide) | Real-time-safe audio graph kernel | 0.3.0 |
 | [auxide-dsp](https://github.com/Michael-A-Kuykendall/auxide-dsp) | DSP nodes library | 0.2.0 |
-| **[auxide-io](https://github.com/Michael-A-Kuykendall/auxide-io)** | Audio I/O layer | 0.2.0 |
+| **auxide-io** | Audio I/O layer | 0.2.0 |
 | [auxide-midi](https://github.com/Michael-A-Kuykendall/auxide-midi) | MIDI integration | 0.2.0 |
