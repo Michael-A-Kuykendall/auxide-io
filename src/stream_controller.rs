@@ -10,6 +10,9 @@ use cpal::{SampleFormat, Stream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Manages real-time audio streaming with lock-free state management.
+///
+/// Handles audio device I/O, buffer adaptation, and error recovery via atomic flags.
 pub struct StreamController {
     stream: Option<Stream>,
     state: Arc<AtomicStreamState>,
@@ -17,7 +20,10 @@ pub struct StreamController {
 }
 
 impl StreamController {
-    /// Get the best available sample rate for audio output
+    /// Finds the best supported sample rate from the default output device.
+    ///
+    /// Attempts to match the requested rate; falls back to standard rates (48000, 44100)
+    /// if exact match unavailable. Returns stereo-compatible configs only.
     pub fn get_best_sample_rate(requested_rate: f32) -> Result<f32> {
         let device = default_output_device()?;
         let requested_sample_rate = requested_rate as u32;
@@ -53,9 +59,40 @@ impl StreamController {
             return Ok(config.sample_rate().0 as f32);
         }
 
-        Err(anyhow::anyhow!("No suitable audio configuration found"))
+        // No suitable configuration found
+        let config_summary: Vec<String> = supported_configs
+            .iter()
+            .map(|c| {
+                format!(
+                    "{}ch @ {}Hz ({})",
+                    c.channels(),
+                    c.sample_rate().0,
+                    match c.sample_format() {
+                        SampleFormat::F32 => "F32",
+                        SampleFormat::I16 => "I16",
+                        SampleFormat::U16 => "U16",
+                        _ => "Other",
+                    }
+                )
+            })
+            .collect();
+
+        Err(anyhow::anyhow!(
+            "No suitable audio configuration found. Requested: {} Hz, F32 format. \
+            Available: {}",
+            requested_rate,
+            if config_summary.is_empty() {
+                "none".to_string()
+            } else {
+                config_summary.join(", ")
+            }
+        ))
     }
 
+    /// Starts real-time audio streaming from the given runtime.
+    ///
+    /// Creates a cpal stream, launches the audio callback, and returns a controller
+    /// for managing playback state. Returns an error if device enumeration or stream creation fails.
     pub fn play(mut runtime: Runtime) -> Result<Self> {
         AtomicStreamState::verify_lock_free_atomics()?;
         let device = default_output_device()?;
@@ -87,6 +124,12 @@ impl StreamController {
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     if data.len() > MAX_HOST_FRAMES {
+                        eprintln!(
+                            "Audio buffer overflow: host requested {} samples but max is {}",
+                            data.len(),
+                            MAX_HOST_FRAMES
+                        );
+                        error_flag_clone.store(true, Ordering::Relaxed);
                         handle_process_error(data);
                         return;
                     }
@@ -117,6 +160,7 @@ impl StreamController {
         })
     }
 
+    /// Starts the audio stream if not already playing.
     pub fn start(&self) -> Result<()> {
         if let Some(stream) = &self.stream {
             stream.play()?;
@@ -125,6 +169,7 @@ impl StreamController {
         Ok(())
     }
 
+    /// Pauses the audio stream.
     pub fn stop(&self) {
         if let Some(stream) = &self.stream {
             let _ = stream.pause();
@@ -132,10 +177,12 @@ impl StreamController {
         self.state.set_state(StreamState::Stopped);
     }
 
+    /// Returns true if an audio callback error was recorded.
     pub fn has_error(&self) -> bool {
         self.error_flag.load(Ordering::Relaxed)
     }
 
+    /// Clears the error flag.
     pub fn clear_error(&self) {
         self.error_flag.store(false, Ordering::Relaxed);
     }

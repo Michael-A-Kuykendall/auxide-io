@@ -1,6 +1,11 @@
+//! Lock-free stream state management.
+//!
+//! Provides atomic state transitions (Running, Paused, Stopped) for real-time safety.
+
 use anyhow::Result;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+/// Stream lifecycle states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StreamState {
@@ -9,21 +14,25 @@ pub enum StreamState {
     Stopped = 2,
 }
 
+/// Lock-free atomic wrapper for stream state transitions.
 pub struct AtomicStreamState {
     state: AtomicU8,
 }
 
 impl AtomicStreamState {
+    /// Creates a new atomic stream state with initial value.
     pub fn new(initial: StreamState) -> Self {
         Self {
             state: AtomicU8::new(initial as u8),
         }
     }
 
+    /// Sets the stream state atomically with Release ordering for synchronization.
     pub fn set_state(&self, state: StreamState) {
         self.state.store(state as u8, Ordering::Release);
     }
 
+    /// Gets the current stream state with Acquire ordering for synchronization.
     pub fn get_state(&self) -> StreamState {
         match self.state.load(Ordering::Acquire) {
             0 => StreamState::Running,
@@ -33,6 +42,7 @@ impl AtomicStreamState {
         }
     }
 
+    /// Verifies that the target platform supports lock-free atomics.
     pub fn verify_lock_free_atomics() -> Result<()> {
         #[cfg(not(target_has_atomic = "8"))]
         return Err(anyhow::anyhow!("AtomicU8 not supported on this platform"));

@@ -1,7 +1,16 @@
+//! Buffer size adaptation between host and runtime block sizes.
+//!
+//! Audio hosts may provide buffers of arbitrary sizes, while the runtime
+//! expects fixed block sizes. This module bridges that gap using a ring buffer.
+
 use auxide::rt::Runtime;
 
 pub const MAX_HOST_FRAMES: usize = 16384;
 
+/// Adapts between host buffer sizes and fixed runtime block sizes.
+///
+/// Uses a ring buffer to accumulate data from multiple runtime blocks
+/// into host buffers, or vice versa, accommodating any size mismatch.
 pub struct BufferSizeAdapter {
     ring_buffer: Vec<f32>,
     read_pos: usize,
@@ -11,6 +20,9 @@ pub struct BufferSizeAdapter {
 }
 
 impl BufferSizeAdapter {
+    /// Creates a new adapter for the given runtime block size.
+    ///
+    /// Allocates a 4× ring buffer to handle common host/runtime size mismatches.
     pub fn new(runtime_block_size: usize) -> Self {
         Self {
             ring_buffer: vec![0.0; 4 * MAX_HOST_FRAMES],
@@ -21,6 +33,9 @@ impl BufferSizeAdapter {
         }
     }
 
+    /// Validates host buffer size against the maximum allowed.
+    ///
+    /// Returns an error if the host buffer exceeds `MAX_HOST_FRAMES`.
     pub fn adapt_to_host_buffer(&mut self, host_size: usize) -> Result<(), &'static str> {
         if host_size > MAX_HOST_FRAMES {
             return Err("Host buffer size exceeds MAX_HOST_FRAMES");
@@ -28,16 +43,32 @@ impl BufferSizeAdapter {
         Ok(())
     }
 
+    /// Handles cases where the host provides less data than the runtime expects.
+    ///
+    /// Currently a no-op; can be extended to implement progressive accumulation.
     pub fn handle_partial_block(&mut self) {
         // Current implementation fills host buffers completely from available data
         // Partial block accumulation could be implemented here if needed for very small host buffers
     }
 
+    /// Handles cases where the host buffer size is unknown or variable.
+    ///
+    /// Size validation happens at stream setup; this marks the point
+    /// where dynamic sizing is managed at stream time.
     pub fn handle_unknown_buffer_size(&mut self) {
         // Current implementation handles unknown/variable sizes dynamically in fill_host_buffer
         // Size validation happens at stream setup time
     }
 
+    /// Fills a host-provided buffer by processing runtime blocks and managing the ring buffer.
+    ///
+    /// Processes enough runtime blocks to supply the requested host buffer,
+    /// duplicating mono output across all channels as needed.
+    ///
+    /// # Arguments
+    /// * `host_buffer` - The output buffer to fill
+    /// * `runtime` - The audio processing runtime
+    /// * `channels` - Number of output channels (duplication factor for mono)
     pub fn fill_host_buffer(
         &mut self,
         host_buffer: &mut [f32],

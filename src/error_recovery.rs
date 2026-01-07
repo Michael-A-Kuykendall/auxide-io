@@ -1,7 +1,13 @@
+//! Error recovery strategies for audio callbacks.
+//!
+//! When process errors occur, output silence rather than propagating audio corruption.
+
+/// Fills the output buffer with silence on process error.
 pub fn handle_process_error(out: &mut [f32]) {
     out.fill(0.0);
 }
 
+/// Handles device-level errors (no-op; errors managed via atomic flags in StreamController).
 pub fn handle_device_error() {
     // Device errors are handled by setting atomic flags in StreamController
     // This function is kept for API consistency but is not directly called

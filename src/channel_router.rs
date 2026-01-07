@@ -1,3 +1,9 @@
+//! Channel routing utilities for mono-to-multi-channel expansion.
+
+/// Duplicates a mono signal to left and right stereo channels.
+///
+/// # Errors
+/// Returns an error if channel lengths don't match the source.
 pub fn duplicate_mono_to_stereo(
     src: &[f32],
     left: &mut [f32],
@@ -13,6 +19,10 @@ pub fn duplicate_mono_to_stereo(
     Ok(())
 }
 
+/// Duplicates a mono signal to any number of channels.
+///
+/// # Errors
+/// Returns an error if any channel length doesn't match the source.
 pub fn duplicate_mono_to_channels(
     src: &[f32],
     dst_channels: &mut [&mut [f32]],

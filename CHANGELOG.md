@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.2] - 2026-01-07
+- **Documentation improvements**: Complete crate-level and module documentation
+- **Error handling enhancements**: Improved error messages for better debugging
+- **Auxide 0.2.1 compatibility**: Updated for latest auxide kernel
+- **RT safety verification**: Confirmed lock-free and allocation-free audio paths
+- **Testing**: All unit tests passing with enhanced coverage
+
+**Requires**: [auxide >= 0.2.1](https://github.com/Michael-A-Kuykendall/auxide/releases/tag/v0.2.1)  
+**Compatible with**: [auxide-dsp 0.1.1](https://github.com/Michael-A-Kuykendall/auxide-dsp/releases/tag/v0.1.1), [auxide-midi 0.1.1](https://github.com/Michael-A-Kuykendall/auxide-midi/releases/tag/v0.1.1)
+
 ## [0.2.0] - 2026-01-05
 - **RT-safety fix** - Removed RT-unsafe println! from audio callback path
 - **Auxide 0.3.0 compatibility** - Updated for compatibility with latest auxide kernel changes

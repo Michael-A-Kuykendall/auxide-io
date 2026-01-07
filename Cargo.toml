@@ -1,6 +1,6 @@
 [package]
 name = "auxide-io"
-version = "0.2.0"
+version = "0.1.2"
 edition = "2021"
 description = "High-performance, real-time safe audio I/O layer for Auxide DSP graphs. Bridges deterministic audio processing to hardware output with buffer adaptation, channel routing, and cross-platform streaming via CPAL."
 license = "MIT"
@@ -13,7 +13,7 @@ jack = ["cpal/jack"]
 default = []
 
 [dependencies]
-auxide = "0.3"
+auxide = "0.2"
 cpal = "0.15"
 anyhow = "1.0"
 
