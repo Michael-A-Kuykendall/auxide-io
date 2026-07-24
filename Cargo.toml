@@ -13,7 +13,7 @@ jack = ["cpal/jack"]
 default = []
 
 [dependencies]
-auxide = "0.2"
+auxide = { path = "../auxide" }
 cpal = "0.15"
 anyhow = "1.0"
 

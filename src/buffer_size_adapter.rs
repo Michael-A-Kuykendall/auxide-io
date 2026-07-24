@@ -3,7 +3,7 @@
 //! Audio hosts may provide buffers of arbitrary sizes, while the runtime
 //! expects fixed block sizes. This module bridges that gap using a ring buffer.
 
-use auxide::rt::Runtime;
+use auxide::rt::{Runtime, RuntimeHandle};
 
 pub const MAX_HOST_FRAMES: usize = 16384;
 
@@ -86,6 +86,61 @@ impl BufferSizeAdapter {
             if available < self.runtime_block_size {
                 // Process a block
                 runtime.process_block(&mut self.block_buffer)?;
+                // Write to ring buffer
+                for &sample in &self.block_buffer {
+                    self.ring_buffer[self.write_pos] = sample;
+                    self.write_pos = (self.write_pos + 1) % self.ring_buffer.len();
+                }
+                // Recalculate available after writing
+                available = if self.write_pos >= self.read_pos {
+                    self.write_pos - self.read_pos
+                } else {
+                    self.ring_buffer.len() - self.read_pos + self.write_pos
+                };
+            }
+            // Read from ring buffer
+            if available >= 1 {
+                let sample = self.ring_buffer[self.read_pos];
+                self.read_pos = (self.read_pos + 1) % self.ring_buffer.len();
+                for _ in 0..channels {
+                    if host_idx < host_buffer.len() {
+                        host_buffer[host_idx] = sample;
+                        host_idx += 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Fills a host-provided buffer using RuntimeHandle (new architecture).
+    ///
+    /// Similar to `fill_host_buffer` but works with RuntimeHandle which includes
+    /// control message handling and invariant signaling.
+    ///
+    /// # Arguments
+    /// * `host_buffer` - The output buffer to fill
+    /// * `handle` - The runtime handle (core + channels)
+    /// * `channels` - Number of output channels (duplication factor for mono)
+    pub fn fill_host_buffer_handle(
+        &mut self,
+        host_buffer: &mut [f32],
+        handle: &mut RuntimeHandle,
+        channels: usize,
+    ) -> Result<(), &'static str> {
+        let mut host_idx = 0;
+        while host_idx < host_buffer.len() {
+            // Check if we need more data
+            let mut available = if self.write_pos >= self.read_pos {
+                self.write_pos - self.read_pos
+            } else {
+                self.ring_buffer.len() - self.read_pos + self.write_pos
+            };
+            if available < self.runtime_block_size {
+                // Process a block (includes control message handling and invariant signaling)
+                handle.process_block(&mut self.block_buffer)?;
                 // Write to ring buffer
                 for &sample in &self.block_buffer {
                     self.ring_buffer[self.write_pos] = sample;

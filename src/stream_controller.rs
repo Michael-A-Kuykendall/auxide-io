@@ -4,7 +4,7 @@ use crate::device_management::DeviceExt;
 use crate::error_recovery::handle_process_error;
 use crate::stream_state::{AtomicStreamState, StreamState};
 use anyhow::Result;
-use auxide::rt::Runtime;
+use auxide::rt::{Runtime, RuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -123,6 +123,9 @@ impl StreamController {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    static CALLBACK_COUNT: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+
                     if data.len() > MAX_HOST_FRAMES {
                         eprintln!(
                             "Audio buffer overflow: host requested {} samples but max is {}",
@@ -133,15 +136,157 @@ impl StreamController {
                         handle_process_error(data);
                         return;
                     }
+
+                    let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if count.is_multiple_of(50) {
+                        eprintln!(
+                            "[Callback #{}] State: {:?}, Buffer size: {}",
+                            count,
+                            state_clone.get_state(),
+                            data.len()
+                        );
+                    }
+
                     match state_clone.get_state() {
                         StreamState::Running => {
                             if adapter.fill_host_buffer(data, &mut runtime, 2).is_err() {
                                 error_flag_clone.store(true, Ordering::Relaxed);
                                 handle_process_error(data);
                             }
+
+                            if count.is_multiple_of(50) {
+                                let max_sample =
+                                    data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                                eprintln!("[Callback #{}] Max sample: {}", count, max_sample);
+                            }
                         }
                         _ => {
                             data.fill(0.0);
+                            if count.is_multiple_of(50) {
+                                eprintln!(
+                                    "[Callback #{}] State not Running - filling with silence",
+                                    count
+                                );
+                            }
+                        }
+                    }
+                },
+                move |_| {
+                    error_flag_clone2.store(true, Ordering::Relaxed);
+                },
+                None,
+            )?,
+            _ => return Err(anyhow::anyhow!("Unsupported sample format")),
+        };
+
+        Ok(Self {
+            stream: Some(stream),
+            state,
+            error_flag,
+        })
+    }
+
+    /// Starts real-time audio streaming from a RuntimeHandle (new architecture).
+    ///
+    /// This is the preferred method for new code. It uses the split architecture:
+    /// - RuntimeHandle is moved into the audio callback
+    /// - Control messages are received via lock-free queue
+    /// - Invariant signals are emitted via lock-free queue
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use auxide::rt::RuntimeCore;
+    /// use auxide_io::StreamController;
+    ///
+    /// let (handle, control) = RuntimeCore::new_with_channels(plan, &graph, 44100.0);
+    /// let stream = StreamController::play_handle(handle)?;
+    /// stream.start()?;
+    ///
+    /// // Control from main thread
+    /// control.set_gain(node_id, 0.5)?;
+    /// ```
+    pub fn play_handle(mut handle: RuntimeHandle) -> Result<Self> {
+        AtomicStreamState::verify_lock_free_atomics()?;
+        let device = default_output_device()?;
+        let sample_rate = handle.sample_rate() as u32;
+        let block_size = handle.block_size();
+
+        // Find a supported configuration that matches our runtime's sample rate
+        let config = device
+            .supported_configs()?
+            .into_iter()
+            .find(|c| {
+                c.sample_rate().0 == sample_rate
+                    && c.channels() == 2
+                    && c.sample_format() == SampleFormat::F32
+            })
+            .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
+
+        let sample_format = config.sample_format();
+        let config = config.config();
+
+        let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
+        let error_flag = Arc::new(AtomicBool::new(false));
+        let state_clone = state.clone();
+        let error_flag_clone = error_flag.clone();
+        let error_flag_clone2 = error_flag.clone();
+        let mut adapter = BufferSizeAdapter::new(block_size);
+
+        let stream = match sample_format {
+            SampleFormat::F32 => device.build_output_stream(
+                &config,
+                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    static CALLBACK_COUNT: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+
+                    if data.len() > MAX_HOST_FRAMES {
+                        eprintln!(
+                            "Audio buffer overflow: host requested {} samples but max is {}",
+                            data.len(),
+                            MAX_HOST_FRAMES
+                        );
+                        error_flag_clone.store(true, Ordering::Relaxed);
+                        handle_process_error(data);
+                        return;
+                    }
+
+                    let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+                    if count.is_multiple_of(50) {
+                        eprintln!(
+                            "[Callback #{}] State: {:?}, Buffer size: {}",
+                            count,
+                            state_clone.get_state(),
+                            data.len()
+                        );
+                    }
+
+                    match state_clone.get_state() {
+                        StreamState::Running => {
+                            // Use fill_host_buffer_handle which processes control messages
+                            // and emits invariant signals
+                            if adapter
+                                .fill_host_buffer_handle(data, &mut handle, 2)
+                                .is_err()
+                            {
+                                error_flag_clone.store(true, Ordering::Relaxed);
+                                handle_process_error(data);
+                            }
+
+                            if count.is_multiple_of(50) {
+                                let max_sample =
+                                    data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                                eprintln!("[Callback #{}] Max sample: {}", count, max_sample);
+                            }
+                        }
+                        _ => {
+                            data.fill(0.0);
+                            if count.is_multiple_of(50) {
+                                eprintln!(
+                                    "[Callback #{}] State not Running - filling with silence",
+                                    count
+                                );
+                            }
                         }
                     }
                 },
