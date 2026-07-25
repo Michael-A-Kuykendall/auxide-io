@@ -7,8 +7,57 @@ use anyhow::Result;
 use auxide::rt::{Runtime, RuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Lock-free diagnostics counters updated from the audio callback.
+///
+/// All fields use `Ordering::Relaxed` — the counters are monotonic
+/// and consumed only on the main thread via `DiagnosticsSnapshot`.
+pub struct Diagnostics {
+    /// Total number of audio callbacks invoked.
+    pub callback_count: AtomicUsize,
+    /// Number of overflow events (host buffer > MAX_HOST_FRAMES).
+    pub overflow_count: AtomicUsize,
+    /// Peak absolute sample value observed (stored as `f32::to_bits`).
+    pub peak: AtomicU32,
+}
+
+impl Diagnostics {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            callback_count: AtomicUsize::new(0),
+            overflow_count: AtomicUsize::new(0),
+            peak: AtomicU32::new(0),
+        })
+    }
+
+    /// Atomically updates `peak` if `sample` is larger (lock-free max).
+    pub fn update_peak(&self, sample: f32) {
+        let bits = sample.to_bits();
+        loop {
+            let current = self.peak.load(Ordering::Relaxed);
+            if bits <= current {
+                break;
+            }
+            if self
+                .peak
+                .compare_exchange_weak(current, bits, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
+    }
+}
+
+/// Read-only snapshot of diagnostics data.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiagnosticsSnapshot {
+    pub callback_count: usize,
+    pub overflow_count: usize,
+    pub peak: f32,
+}
 
 /// Manages real-time audio streaming with lock-free state management.
 ///
@@ -17,6 +66,7 @@ pub struct StreamController {
     stream: Option<Stream>,
     state: Arc<AtomicStreamState>,
     error_flag: Arc<AtomicBool>,
+    diagnostics: Arc<Diagnostics>,
 }
 
 impl StreamController {
@@ -114,37 +164,24 @@ impl StreamController {
 
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
+        let diagnostics = Diagnostics::new();
         let state_clone = state.clone();
         let error_flag_clone = error_flag.clone();
         let error_flag_clone2 = error_flag.clone();
+        let diag_clone = diagnostics.clone();
         let mut adapter = BufferSizeAdapter::new(runtime.plan.block_size);
 
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    static CALLBACK_COUNT: std::sync::atomic::AtomicUsize =
-                        std::sync::atomic::AtomicUsize::new(0);
+                    diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
 
                     if data.len() > MAX_HOST_FRAMES {
-                        eprintln!(
-                            "Audio buffer overflow: host requested {} samples but max is {}",
-                            data.len(),
-                            MAX_HOST_FRAMES
-                        );
+                        diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
                         error_flag_clone.store(true, Ordering::Relaxed);
                         handle_process_error(data);
                         return;
-                    }
-
-                    let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                    if count.is_multiple_of(50) {
-                        eprintln!(
-                            "[Callback #{}] State: {:?}, Buffer size: {}",
-                            count,
-                            state_clone.get_state(),
-                            data.len()
-                        );
                     }
 
                     match state_clone.get_state() {
@@ -154,20 +191,11 @@ impl StreamController {
                                 handle_process_error(data);
                             }
 
-                            if count.is_multiple_of(50) {
-                                let max_sample =
-                                    data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                                eprintln!("[Callback #{}] Max sample: {}", count, max_sample);
-                            }
+                            let max_sample = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                            diag_clone.update_peak(max_sample);
                         }
                         _ => {
                             data.fill(0.0);
-                            if count.is_multiple_of(50) {
-                                eprintln!(
-                                    "[Callback #{}] State not Running - filling with silence",
-                                    count
-                                );
-                            }
                         }
                     }
                 },
@@ -183,6 +211,7 @@ impl StreamController {
             stream: Some(stream),
             state,
             error_flag,
+            diagnostics,
         })
     }
 
@@ -228,37 +257,24 @@ impl StreamController {
 
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
+        let diagnostics = Diagnostics::new();
         let state_clone = state.clone();
         let error_flag_clone = error_flag.clone();
         let error_flag_clone2 = error_flag.clone();
+        let diag_clone = diagnostics.clone();
         let mut adapter = BufferSizeAdapter::new(block_size);
 
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    static CALLBACK_COUNT: std::sync::atomic::AtomicUsize =
-                        std::sync::atomic::AtomicUsize::new(0);
+                    diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
 
                     if data.len() > MAX_HOST_FRAMES {
-                        eprintln!(
-                            "Audio buffer overflow: host requested {} samples but max is {}",
-                            data.len(),
-                            MAX_HOST_FRAMES
-                        );
+                        diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
                         error_flag_clone.store(true, Ordering::Relaxed);
                         handle_process_error(data);
                         return;
-                    }
-
-                    let count = CALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                    if count.is_multiple_of(50) {
-                        eprintln!(
-                            "[Callback #{}] State: {:?}, Buffer size: {}",
-                            count,
-                            state_clone.get_state(),
-                            data.len()
-                        );
                     }
 
                     match state_clone.get_state() {
@@ -273,20 +289,11 @@ impl StreamController {
                                 handle_process_error(data);
                             }
 
-                            if count.is_multiple_of(50) {
-                                let max_sample =
-                                    data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                                eprintln!("[Callback #{}] Max sample: {}", count, max_sample);
-                            }
+                            let max_sample = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                            diag_clone.update_peak(max_sample);
                         }
                         _ => {
                             data.fill(0.0);
-                            if count.is_multiple_of(50) {
-                                eprintln!(
-                                    "[Callback #{}] State not Running - filling with silence",
-                                    count
-                                );
-                            }
                         }
                     }
                 },
@@ -302,6 +309,7 @@ impl StreamController {
             stream: Some(stream),
             state,
             error_flag,
+            diagnostics,
         })
     }
 
@@ -330,6 +338,15 @@ impl StreamController {
     /// Clears the error flag.
     pub fn clear_error(&self) {
         self.error_flag.store(false, Ordering::Relaxed);
+    }
+
+    /// Returns a snapshot of the lock-free diagnostics counters.
+    pub fn diagnostics(&self) -> DiagnosticsSnapshot {
+        DiagnosticsSnapshot {
+            callback_count: self.diagnostics.callback_count.load(Ordering::Relaxed),
+            overflow_count: self.diagnostics.overflow_count.load(Ordering::Relaxed),
+            peak: f32::from_bits(self.diagnostics.peak.load(Ordering::Relaxed)),
+        }
     }
 }
 
@@ -383,6 +400,7 @@ mod tests {
             stream: None,
             state: Arc::new(AtomicStreamState::new(StreamState::Stopped)),
             error_flag: Arc::new(AtomicBool::new(false)),
+            diagnostics: Diagnostics::new(),
         };
 
         // start should not change state since no stream
@@ -401,6 +419,51 @@ mod tests {
         assert!(controller.has_error());
         controller.clear_error();
         assert!(!controller.has_error());
+
+        // diagnostics accessor
+        let diag = controller.diagnostics();
+        assert_eq!(diag.callback_count, 0);
+        assert_eq!(diag.overflow_count, 0);
+        assert_eq!(diag.peak, 0.0);
+    }
+
+    #[test]
+    fn test_diagnostics_counters() {
+        let d = Diagnostics::new();
+        assert_eq!(
+            d.callback_count.load(Ordering::Relaxed),
+            0,
+            "fresh diagnostics should have zero callback_count"
+        );
+        assert_eq!(
+            d.overflow_count.load(Ordering::Relaxed),
+            0,
+            "fresh diagnostics should have zero overflow_count"
+        );
+        assert_eq!(d.peak.load(Ordering::Relaxed), 0, "fresh peak should be 0");
+
+        d.callback_count.fetch_add(1, Ordering::Relaxed);
+        d.overflow_count.fetch_add(1, Ordering::Relaxed);
+        d.update_peak(0.5);
+
+        assert_eq!(d.callback_count.load(Ordering::Relaxed), 1);
+        assert_eq!(d.overflow_count.load(Ordering::Relaxed), 1);
+        assert_eq!(f32::from_bits(d.peak.load(Ordering::Relaxed)), 0.5);
+    }
+
+    #[test]
+    fn test_diagnostics_peak_monotonic() {
+        let d = Diagnostics::new();
+        d.update_peak(0.5);
+        assert_eq!(f32::from_bits(d.peak.load(Ordering::Relaxed)), 0.5);
+        d.update_peak(0.3);
+        assert_eq!(
+            f32::from_bits(d.peak.load(Ordering::Relaxed)),
+            0.5,
+            "peak should remain 0.5 (higher)"
+        );
+        d.update_peak(0.9);
+        assert_eq!(f32::from_bits(d.peak.load(Ordering::Relaxed)), 0.9);
     }
 
     #[test]
