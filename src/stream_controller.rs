@@ -9,7 +9,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Lock-free diagnostics counters updated from the audio callback.
 ///
@@ -23,11 +23,8 @@ pub struct Diagnostics {
     /// Peak absolute sample value observed (stored as `f32::to_bits`).
     pub peak: AtomicU32,
     /// Most recent reported output latency in nanoseconds (0 = unknown / no stream).
-    /// Captured from the measured callback interval each callback (see
-    /// [`Diagnostics::record_callback_time`]).
+    /// Captured from `cpal::OutputCallbackInfo::timestamp()` each callback.
     pub latency_nanos: AtomicU64,
-    /// Timestamp of the previous callback, used to derive the interval.
-    pub last_cb: Mutex<Option<Instant>>,
 }
 
 impl Diagnostics {
@@ -37,25 +34,15 @@ impl Diagnostics {
             overflow_count: AtomicUsize::new(0),
             peak: AtomicU32::new(0),
             latency_nanos: AtomicU64::new(0),
-            last_cb: Mutex::new(None),
         })
     }
 
-    /// Records the time of this callback and derives the inter-callback
-    /// interval as the reported output latency (the host buffer period).
-    ///
-    /// NOTE: `cpal`'s `OutputCallbackInfo.timestamp` is `private` in
-    /// 0.15.x, so the exact presentation timestamp cannot be read
-    /// directly; the measured callback interval is the available latency signal.
-    pub fn record_callback_time(&self, now: Instant) {
-        if let Ok(mut g) = self.last_cb.lock() {
-            let nanos = match *g {
-                Some(prev) => now.duration_since(prev).as_nanos().min(u64::MAX as u128) as u64,
-                None => 0,
-            };
-            *g = Some(now);
-            self.latency_nanos.store(nanos, Ordering::Relaxed);
-        }
+    /// Records the latest output latency (in nanoseconds) from the callback.
+    pub fn update_latency(&self, nanos: u64) {
+        self.latency_nanos.store(
+            (nanos as u128).min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
     }
 
     /// Atomically updates `peak` if `sample` is larger (lock-free max).
@@ -102,6 +89,19 @@ pub struct StreamController {
     /// Shared handle store: the callback borrows the handle every block;
     /// recover() takes it out to rebuild the stream.
     handle_store: Arc<Mutex<Option<RuntimeHandle>>>,
+}
+
+/// Derives the output latency (presentation delay) from a `cpal`
+/// [`OutputCallbackInfo`] timestamp.
+///
+/// Calls the **public** [`cpal::OutputCallbackInfo::timestamp`] method
+/// (the `timestamp` *field* is private in cpal 0.15.x — using it
+/// would not compile) to obtain the `OutputStreamTimestamp`, then returns
+/// the delta between the predicted playback instant and the callback
+/// invocation instant. Returns `None` if the timestamp is not later
+/// than the callback instant.
+pub fn output_latency(ts: &cpal::OutputStreamTimestamp) -> Option<Duration> {
+    ts.playback.duration_since(&ts.callback)
 }
 
 impl StreamController {
@@ -212,13 +212,15 @@ impl StreamController {
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
 
-                    // Report output latency as the measured callback interval
-                    // (cpal's OutputCallbackInfo.timestamp is private in 0.15.x,
-                    // so the exact presentation timestamp is unavailable).
-                    diag_clone.record_callback_time(Instant::now());
+                    // Report output latency from the cpal callback timestamp.
+                    // Uses the PUBLIC `OutputCallbackInfo::timestamp()` method
+                    // (the `timestamp` *field* is private; the method is not).
+                    if let Some(d) = output_latency(&info.timestamp()) {
+                        diag_clone.update_latency(d.as_nanos().min(u64::MAX as u128) as u64);
+                    }
 
                     if data.len() > MAX_HOST_FRAMES {
                         diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
@@ -305,13 +307,15 @@ impl StreamController {
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
                     diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
 
-                    // Report output latency as the measured callback interval
-                    // (cpal's OutputCallbackInfo.timestamp is private in 0.15.x,
-                    // so the exact presentation timestamp is unavailable).
-                    diag_clone.record_callback_time(Instant::now());
+                    // Report output latency from the cpal callback timestamp.
+                    // Uses the PUBLIC `OutputCallbackInfo::timestamp()` method
+                    // (the `timestamp` *field* is private; the method is not).
+                    if let Some(d) = output_latency(&info.timestamp()) {
+                        diag_clone.update_latency(d.as_nanos().min(u64::MAX as u128) as u64);
+                    }
 
                     if data.len() > MAX_HOST_FRAMES {
                         diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
@@ -583,15 +587,56 @@ mod tests {
         };
         assert!(controller.latency().is_none());
 
-        // The callback records the latency-free counter; when a stream runs it
-        // stores a non-zero value derived from OutputCallbackInfo.timestamp.
-        let snap = DiagnosticsSnapshot {
-            callback_count: 1,
-            overflow_count: 0,
-            peak: 0.0,
-            latency: Some(Duration::from_nanos(1_234_000)),
-        };
-        assert_eq!(snap.latency, Some(Duration::from_nanos(1_234_000)));
+        use crate::device_management::default_output_device;
+        use auxide::rt::Runtime;
+        use std::thread::sleep;
+
+        // The genuine latency can only be obtained inside a real cpal
+        // callback: cpal keeps `OutputCallbackInfo.timestamp` AND
+        // `StreamInstant`'s fields private, so the value cannot be
+        // constructed/faked in a unit test. We therefore exercise the
+        // real `output_latency(info.timestamp())` path on a live device
+        // (guarded, matching the rest of this crate's hardware tests).
+        if let Ok(device) = default_output_device() {
+            // cpal requires an *exact* sample-rate match against the device's
+            // supported configs, so pick one the real device actually offers
+            // instead of assuming 44100 Hz.
+            let sample_rate = device
+                .supported_configs()
+                .expect("device exposes supported configs")
+                .into_iter()
+                .find(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
+                .map(|c| c.sample_rate().0)
+                .expect("device offers a 2-channel F32 config");
+
+            let mut graph = Graph::new();
+            let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+            let sink = graph.add_node(NodeType::OutputSink);
+            graph
+                .add_edge(auxide::graph::Edge {
+                    from_node: osc,
+                    from_port: PortId(0),
+                    to_node: sink,
+                    to_port: PortId(0),
+                    rate: Rate::Audio,
+                })
+                .unwrap();
+            let plan = Plan::compile(&graph, 64).unwrap();
+            let runtime = Runtime::new(plan, &graph, sample_rate as f32);
+            let sc = StreamController::play(runtime).expect("stream starts with a device");
+            sc.start().expect("stream should start on a live device");
+            let mut saw_some = false;
+            for _ in 0..200 {
+                if let Some(d) = sc.latency() {
+                    assert!(d > Duration::ZERO, "reported latency must be non-zero");
+                    saw_some = true;
+                    break;
+                }
+                sleep(Duration::from_millis(1));
+            }
+            sc.stop();
+            assert!(saw_some, "a real stream must report a non-zero latency");
+        }
     }
 
     #[test]
