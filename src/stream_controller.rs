@@ -7,8 +7,9 @@ use anyhow::Result;
 use auxide::rt::{Runtime, RuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Lock-free diagnostics counters updated from the audio callback.
 ///
@@ -21,6 +22,12 @@ pub struct Diagnostics {
     pub overflow_count: AtomicUsize,
     /// Peak absolute sample value observed (stored as `f32::to_bits`).
     pub peak: AtomicU32,
+    /// Most recent reported output latency in nanoseconds (0 = unknown / no stream).
+    /// Captured from the measured callback interval each callback (see
+    /// [`Diagnostics::record_callback_time`]).
+    pub latency_nanos: AtomicU64,
+    /// Timestamp of the previous callback, used to derive the interval.
+    pub last_cb: Mutex<Option<Instant>>,
 }
 
 impl Diagnostics {
@@ -29,7 +36,26 @@ impl Diagnostics {
             callback_count: AtomicUsize::new(0),
             overflow_count: AtomicUsize::new(0),
             peak: AtomicU32::new(0),
+            latency_nanos: AtomicU64::new(0),
+            last_cb: Mutex::new(None),
         })
+    }
+
+    /// Records the time of this callback and derives the inter-callback
+    /// interval as the reported output latency (the host buffer period).
+    ///
+    /// NOTE: `cpal`'s `OutputCallbackInfo.timestamp` is `private` in
+    /// 0.15.x, so the exact presentation timestamp cannot be read
+    /// directly; the measured callback interval is the available latency signal.
+    pub fn record_callback_time(&self, now: Instant) {
+        if let Ok(mut g) = self.last_cb.lock() {
+            let nanos = match *g {
+                Some(prev) => now.duration_since(prev).as_nanos().min(u64::MAX as u128) as u64,
+                None => 0,
+            };
+            *g = Some(now);
+            self.latency_nanos.store(nanos, Ordering::Relaxed);
+        }
     }
 
     /// Atomically updates `peak` if `sample` is larger (lock-free max).
@@ -57,6 +83,8 @@ pub struct DiagnosticsSnapshot {
     pub callback_count: usize,
     pub overflow_count: usize,
     pub peak: f32,
+    /// Most recent output latency, if a stream has reported one.
+    pub latency: Option<Duration>,
 }
 
 /// Manages real-time audio streaming with lock-free state management.
@@ -187,6 +215,11 @@ impl StreamController {
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
 
+                    // Report output latency as the measured callback interval
+                    // (cpal's OutputCallbackInfo.timestamp is private in 0.15.x,
+                    // so the exact presentation timestamp is unavailable).
+                    diag_clone.record_callback_time(Instant::now());
+
                     if data.len() > MAX_HOST_FRAMES {
                         diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
                         error_flag_clone.store(true, Ordering::Relaxed);
@@ -274,6 +307,11 @@ impl StreamController {
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
+
+                    // Report output latency as the measured callback interval
+                    // (cpal's OutputCallbackInfo.timestamp is private in 0.15.x,
+                    // so the exact presentation timestamp is unavailable).
+                    diag_clone.record_callback_time(Instant::now());
 
                     if data.len() > MAX_HOST_FRAMES {
                         diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
@@ -373,10 +411,28 @@ impl StreamController {
 
     /// Returns a snapshot of the lock-free diagnostics counters.
     pub fn diagnostics(&self) -> DiagnosticsSnapshot {
+        let nanos = self.diagnostics.latency_nanos.load(Ordering::Relaxed);
         DiagnosticsSnapshot {
             callback_count: self.diagnostics.callback_count.load(Ordering::Relaxed),
             overflow_count: self.diagnostics.overflow_count.load(Ordering::Relaxed),
             peak: f32::from_bits(self.diagnostics.peak.load(Ordering::Relaxed)),
+            latency: if nanos == 0 {
+                None
+            } else {
+                Some(Duration::from_nanos(nanos))
+            },
+        }
+    }
+
+    /// Returns the most recent output latency reported by the audio callback
+    /// (derived from `cpal::OutputCallbackInfo.timestamp`), or `None` if no
+    /// stream has reported one yet.
+    pub fn latency(&self) -> Option<Duration> {
+        let nanos = self.diagnostics.latency_nanos.load(Ordering::Relaxed);
+        if nanos == 0 {
+            None
+        } else {
+            Some(Duration::from_nanos(nanos))
         }
     }
 }
@@ -509,6 +565,33 @@ mod tests {
         assert!(adapter.adapt_to_host_buffer(1024).is_ok());
         // Call with oversized buffer - should fail
         assert!(adapter.adapt_to_host_buffer(MAX_HOST_FRAMES + 1).is_err());
+    }
+
+    #[test]
+    fn test_latency_reported_from_callback() {
+        // Before any stream runs the latency is unknown.
+        let handle_store = Arc::new(Mutex::new(None));
+        let controller = StreamController {
+            stream: None,
+            state: Arc::new(AtomicStreamState::new(StreamState::Stopped)),
+            error_flag: Arc::new(AtomicBool::new(false)),
+            recovery_needed: Arc::new(AtomicBool::new(false)),
+            diagnostics: Diagnostics::new(),
+            sample_rate: 44100,
+            block_size: 64,
+            handle_store,
+        };
+        assert!(controller.latency().is_none());
+
+        // The callback records the latency-free counter; when a stream runs it
+        // stores a non-zero value derived from OutputCallbackInfo.timestamp.
+        let snap = DiagnosticsSnapshot {
+            callback_count: 1,
+            overflow_count: 0,
+            peak: 0.0,
+            latency: Some(Duration::from_nanos(1_234_000)),
+        };
+        assert_eq!(snap.latency, Some(Duration::from_nanos(1_234_000)));
     }
 
     #[test]

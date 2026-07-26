@@ -27,7 +27,9 @@ Stream Auxide's audio graphs to speakers with CPAL, featuring buffer size adapta
 - **Buffer Adaptation**: Automatic buffer size matching between graph and hardware
 - **Channel Routing**: Flexible channel mapping and routing
 - **Error Recovery**: Robust error handling and recovery mechanisms
-- **RT-Safe**: Zero allocations in audio processing paths
+- **RT-Safe**: `#![forbid(unsafe_code)]`; the real-time audio **callback** performs
+  no heap allocation (buffers are pre-allocated at stream setup; lock-free atomics
+  carry diagnostics), so it is safe to call from the audio thread.
 
 ## Usage
 

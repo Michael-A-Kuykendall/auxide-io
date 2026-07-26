@@ -48,6 +48,7 @@ fn callback_no_alloc() {
         callback_count: d.callback_count.load(Ordering::Relaxed),
         overflow_count: d.overflow_count.load(Ordering::Relaxed),
         peak: f32::from_bits(d.peak.load(Ordering::Relaxed)),
+        latency: None,
     };
     assert_eq!(snapshot.callback_count, 1);
     assert_eq!(snapshot.overflow_count, 0);
