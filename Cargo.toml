@@ -16,6 +16,11 @@ default = []
 auxide = { path = "../auxide" }
 cpal = "0.15"
 anyhow = "1.0"
+hound = "3.5"
+
+[dev-dependencies]
+auxide = { path = "../auxide" }
+criterion = "0.5"
 
 [[example]]
 name = "play_tone"
@@ -28,3 +33,7 @@ path = "examples/play_sine.rs"
 [[example]]
 name = "audio_mixer"
 path = "examples/audio_mixer.rs"
+
+[[bench]]
+name = "latency_bench"
+harness = false

@@ -1,6 +1,6 @@
 //! Lock-free stream state management.
 //!
-//! Provides atomic state transitions (Running, Paused, Stopped) for real-time safety.
+//! Provides atomic state transitions (Running, Stopped) for real-time safety.
 
 use anyhow::Result;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 #[repr(u8)]
 pub enum StreamState {
     Running = 0,
-    Paused = 1,
-    Stopped = 2,
+    Stopped = 1,
 }
 
 /// Lock-free atomic wrapper for stream state transitions.
@@ -36,8 +35,7 @@ impl AtomicStreamState {
     pub fn get_state(&self) -> StreamState {
         match self.state.load(Ordering::Acquire) {
             0 => StreamState::Running,
-            1 => StreamState::Paused,
-            2 => StreamState::Stopped,
+            1 => StreamState::Stopped,
             _ => StreamState::Stopped, // Default to stopped on invalid
         }
     }
@@ -69,21 +67,12 @@ mod tests {
         assert_eq!(state.get_state(), StreamState::Stopped);
         state.set_state(StreamState::Running);
         assert_eq!(state.get_state(), StreamState::Running);
-        state.set_state(StreamState::Paused);
-        assert_eq!(state.get_state(), StreamState::Paused);
         state.set_state(StreamState::Stopped);
         assert_eq!(state.get_state(), StreamState::Stopped);
     }
 
     #[test]
-    fn test_pause_produces_silence() {
-        // Since pause sets state, and callback checks state, assume it silences
-        // Hard to test without full controller
-    }
-
-    #[test]
     fn test_startup_atomic_check() {
-        // Since we assume true, just call it
         assert!(AtomicStreamState::verify_lock_free_atomics().is_ok());
     }
 

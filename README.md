@@ -19,17 +19,18 @@
 # Auxide IO
 
 **Real-time audio I/O layer for Auxide.**  
-Stream Auxide's audio graphs to speakers with CPAL, featuring buffer size adaptation, channel routing, and RT-safe operation.
+Stream Auxide's audio graphs to speakers (and capture from microphones) with CPAL, featuring buffer-size adaptation, sample-rate negotiation with a resampling fallback, channel routing, transport-linked timing, and RT-safe operation.
 
 ## Features
 
-- **CPAL Integration**: Cross-platform audio I/O with CPAL
-- **Buffer Adaptation**: Automatic buffer size matching between graph and hardware
-- **Channel Routing**: Flexible channel mapping and routing
-- **Error Recovery**: Robust error handling and recovery mechanisms
-- **RT-Safe**: `#![forbid(unsafe_code)]`; the real-time audio **callback** performs
-  no heap allocation (buffers are pre-allocated at stream setup; lock-free atomics
-  carry diagnostics), so it is safe to call from the audio thread.
+- **CPAL Integration**: Cross-platform audio I/O with CPAL.
+- **Sample-Rate Negotiation**: `get_best_sample_rate` picks a device-supported rate; when the runtime rate still differs, a linear `LinearResampler` fallback bridges the gap.
+- **Buffer Adaptation**: Automatic buffer-size matching between graph and hardware via a ring buffer.
+- **Channel Routing**: Flexible routing via `ChannelMap` (mono→stereo by default, or an explicit source→destination map).
+- **Transport Timing**: Install a `TransportClock` sampled once per host buffer.
+- **Input & Duplex**: `play_input` / `play_duplex` capture into a `Recorder` (WAV export via `hound`).
+- **Error Recovery**: Robust error handling and recovery mechanisms (`recover` / `restart`).
+- **RT-Safe**: `#![forbid(unsafe_code)]`; the real-time audio **callback** performs no heap allocation (buffers are pre-allocated at stream setup; lock-free atomics carry diagnostics), so it is safe to call from the audio thread.
 
 ## Usage
 
@@ -41,45 +42,85 @@ auxide = "0.3"
 auxide-io = "0.2"
 ```
 
-## Example
+A minimal, compiling example lives in [`examples/stream_example.rs`](examples/stream_example.rs). The short version:
 
 ```rust
-use auxide_io::{AudioStream, StreamConfig};
+use auxide::graph::{Graph, NodeType, PortId, Rate};
+use auxide::plan::Plan;
+use auxide::rt::RuntimeCore;
+use auxide_io::{ChannelMap, StreamController, TransportClock, TransportTime};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
-// Configure audio stream
-let config = StreamConfig {
-    sample_rate: 44100.0,
-    channels: 2,
-    buffer_size: 512,
-};
+struct Clock { sample: AtomicU64, bpm: f32 }
+impl TransportClock for Clock {
+    fn transport_time(&self) -> TransportTime {
+        let s = self.sample.fetch_add(64, Ordering::Relaxed);
+        TransportTime { bpm: self.bpm, beat_phase: 0.0, sample: s }
+    }
+}
 
-// Create and start audio stream
-let mut stream = AudioStream::new(config)?;
-stream.start()?;
+fn main() -> anyhow::Result<()> {
+    let mut graph = Graph::new();
+    let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+    let sink = graph.add_node(NodeType::OutputSink);
+    graph.add_edge(auxide::graph::Edge {
+        from_node: osc, from_port: PortId(0),
+        to_node: sink, to_port: PortId(0), rate: Rate::Audio,
+    }).unwrap();
+    let plan = Plan::compile(&graph, 64).unwrap();
 
-// Stream will automatically process auxide graphs
-// Audio flows from graph output to speakers
+    // Preferred path: RuntimeHandle + control channel.
+    let (handle, _control) = RuntimeCore::new_with_channels(plan, &graph, 44100.0);
+    let sc = StreamController::play_handle(handle)?;
+    sc.set_transport_clock(Box::new(Clock { sample: AtomicU64::new(0), bpm: 120.0 }));
+    sc.start()?;
+    std::thread::sleep(Duration::from_millis(50));
+    sc.stop();
+    Ok(())
+}
 ```
 
 ## Architecture
 
-Auxide IO provides the bridge between Auxide's audio graphs and system audio hardware:
+Auxide IO bridges Auxide's audio graphs and system audio hardware:
 
-- **Stream Controller**: Manages audio stream lifecycle
-- **Buffer Adapter**: Handles buffer size mismatches
-- **Channel Router**: Maps graph outputs to hardware channels
-- **Error Recovery**: Handles device errors gracefully
+- **`StreamController`**: Manages audio stream lifecycle (play / play_handle / play_on_device / play_input / play_duplex), diagnostics, transport clock, and error recovery.
+- **`BufferSizeAdapter`**: Handles buffer-size mismatches and applies the active `ChannelMap`; owns the optional resampler fallback.
+- **`ChannelMap`**: Maps the mono runtime output onto device channels (default `MonoToStereo`, or `Explicit(Vec<(src, dst)>)`).
+- **`LinearResampler`**: Linear interpolation between runtime and device sample rates.
+- **`Recorder`**: Accumulates captured input and exports WAV (`hound`).
+- **`device_management`**: Device enumeration, selection, and supported-config queries.
+
+## API Quick Reference
+
+| Constructor | Purpose |
+|-------------|---------|
+| `StreamController::play(Runtime)` | Legacy path (no restart after error). |
+| `StreamController::play_handle(RuntimeHandle)` | Preferred; restartable after recovery. |
+| `play_on_device(index, …)` / `play_handle_on_device(index, …)` | Target a device by enumeration index. |
+| `play_on_device_by_name(name, …)` | Target a device by name. |
+| `play_with_channel_map(…, ChannelMap)` | Custom channel routing. |
+| `play_input(device, rate, channels, Recorder)` | Capture input to a `Recorder`. |
+| `play_duplex(device, rate, channels, Recorder, Runtime)` | Simultaneous output + input capture. |
+
+- `get_best_sample_rate(requested)` — negotiates a device-supported rate.
+- `set_transport_clock(clock)` / `transport_time()` — musical-time sampling.
+- `latency()` / `diagnostics()` — lock-free diagnostics (latency from `OutputCallbackInfo::timestamp`).
+- `recover()` / `restart()` — rebuild the stream after a device error.
 
 ## Status
 
 - ✅ CPAL Integration: Cross-platform audio I/O working
 - ✅ Buffer Adaptation: Automatic size matching implemented
-- ✅ Channel Routing: Flexible routing system complete
-- ✅ Error Recovery: Robust error handling in place
-- 📋 Performance: Latency optimization ongoing
+- ✅ Channel Routing: `ChannelMap` (MonoToStereo + explicit) implemented
+- ✅ Sample-Rate Negotiation + Resampling: `get_best_sample_rate` wired; `LinearResampler` fallback
+- ✅ Input / Duplex Recording: `Recorder` + `play_input` / `play_duplex`
+- ✅ Device Selection: `play_on_device` / `play_on_device_by_name`
+- ✅ Error Recovery: Robust handling in place
+- 📋 Performance: Latency/glitch benchmark harness in `benches/`
 
 ## Community & Support
-
 • 🐛 Bug Reports: [GitHub Issues](https://github.com/Michael-A-Kuykendall/auxide-io/issues)
 • 💬 Discussions: [GitHub Discussions](https://github.com/Michael-A-Kuykendall/auxide-io/discussions)
 • 📖 Documentation: [docs.rs](https://docs.rs/auxide-io)
@@ -89,7 +130,6 @@ Auxide IO provides the bridge between Auxide's audio graphs and system audio har
 • 🔒 Security: [SECURITY.md](https://github.com/Michael-A-Kuykendall/auxide-io/blob/main/SECURITY.md)
 
 ## License & Philosophy
-
 MIT License - forever and always.
 
 **Philosophy**: Audio I/O should be invisible. Auxide is infrastructure.
