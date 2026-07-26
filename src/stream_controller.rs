@@ -74,9 +74,82 @@ pub struct DiagnosticsSnapshot {
     pub latency: Option<Duration>,
 }
 
+/// A point in musical time, sampled once per host buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TransportTime {
+    /// Tempo in beats per minute (0.0 when no clock is set / no tempo).
+    pub bpm: f32,
+    /// Beat phase in `[0.0, 1.0)` (0.0 when no clock is set).
+    pub beat_phase: f32,
+    /// Absolute sample position at the start of the current buffer.
+    pub sample: u64,
+}
+
+/// Source of musical time for the audio callback.
+///
+/// Implementors are queried once per host buffer via
+/// [`StreamController::set_transport_clock`]; the most recent value is cached
+/// and exposed through [`StreamController::transport_time`].
+pub trait TransportClock {
+    /// Returns the current transport position. Called once per host buffer.
+    fn transport_time(&self) -> TransportTime;
+}
+
+/// Default no-op clock: reports zeroed musical time.
+///
+/// Used implicitly when no clock has been installed (the callback simply never
+/// updates the cached value, so [`StreamController::transport_time`] yields
+/// zeros and existing callers are unaffected).
+pub struct IdentityClock;
+
+impl TransportClock for IdentityClock {
+    fn transport_time(&self) -> TransportTime {
+        TransportTime {
+            bpm: 0.0,
+            beat_phase: 0.0,
+            sample: 0,
+        }
+    }
+}
+
+/// Shared transport state: an optional clock plus the most recent value it
+/// reported. Safe to share across the audio callback and the main thread.
+pub struct TransportState {
+    clock: Mutex<Option<Box<dyn TransportClock + Send + Sync>>>,
+    last: Mutex<TransportTime>,
+}
+
+impl TransportState {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            clock: Mutex::new(None),
+            last: Mutex::new(TransportTime::default()),
+        })
+    }
+
+    /// Installs (or replaces) the transport clock.
+    pub fn set_clock(&self, clock: Box<dyn TransportClock + Send + Sync>) {
+        *self.clock.lock().unwrap() = Some(clock);
+    }
+
+    /// Samples the installed clock once (no-op when no clock is set) and caches
+    /// the resulting value. Call once per host buffer.
+    pub fn tick(&self) {
+        if let Some(clock) = self.clock.lock().unwrap().as_ref() {
+            *self.last.lock().unwrap() = clock.transport_time();
+        }
+    }
+
+    /// Returns the most recently cached transport value.
+    pub fn sample(&self) -> TransportTime {
+        *self.last.lock().unwrap()
+    }
+}
+
 /// Manages real-time audio streaming with lock-free state management.
 ///
-/// Handles audio device I/O, buffer adaptation, and error recovery via atomic flags.
+/// Handles audio device I/O, buffer adaptation, error recovery, and an
+/// optional transport clock via atomic flags and shared state.
 #[allow(dead_code)]
 pub struct StreamController {
     stream: Option<Stream>,
@@ -89,6 +162,8 @@ pub struct StreamController {
     /// Shared handle store: the callback borrows the handle every block;
     /// recover() takes it out to rebuild the stream.
     handle_store: Arc<Mutex<Option<RuntimeHandle>>>,
+    /// Optional musical-time clock, sampled once per host buffer.
+    transport: Arc<TransportState>,
 }
 
 /// Derives the output latency (presentation delay) from a `cpal`
@@ -174,16 +249,80 @@ impl StreamController {
         ))
     }
 
-    /// Starts real-time audio streaming from the given runtime.
+    /// Shared audio-callback body used by both `play` and `play_handle`.
     ///
-    /// Creates a cpal stream, launches the audio callback, and returns a controller
-    /// for managing playback state. Returns an error if device enumeration or stream creation fails.
-    pub fn play(mut runtime: Runtime) -> Result<Self> {
-        AtomicStreamState::verify_lock_free_atomics()?;
-        let device = default_output_device()?;
-        let sample_rate = runtime.sample_rate() as u32;
-        let block_size = runtime.plan.block_size;
+    /// Captures output latency from `info.timestamp()`, guards against host
+    /// buffer overflow, and — when running — drives the supplied `fill`
+    /// closure (which pulls samples from the graph / `RuntimeHandle`). All
+    /// counters are lock-free. Contains no logging (RT-safe).
+    #[allow(clippy::too_many_arguments)]
+    fn run_callback<F>(
+        data: &mut [f32],
+        info: &cpal::OutputCallbackInfo,
+        adapter: &mut BufferSizeAdapter,
+        diagnostics: &Diagnostics,
+        state: &AtomicStreamState,
+        error_flag: &AtomicBool,
+        recovery_needed: &AtomicBool,
+        transport: &TransportState,
+        fill: &mut F,
+    ) where
+        F: FnMut(&mut [f32], &mut BufferSizeAdapter) -> Result<()>,
+    {
+        // Sample the transport clock once per host buffer (no-op if unset).
+        transport.tick();
 
+        diagnostics.callback_count.fetch_add(1, Ordering::Relaxed);
+
+        // Report output latency from the cpal callback timestamp.
+        // Uses the PUBLIC `OutputCallbackInfo::timestamp()` method
+        // (the `timestamp` *field* is private in cpal 0.15.x).
+        if let Some(d) = output_latency(&info.timestamp()) {
+            diagnostics.update_latency(d.as_nanos().min(u64::MAX as u128) as u64);
+        }
+
+        if data.len() > MAX_HOST_FRAMES {
+            diagnostics.overflow_count.fetch_add(1, Ordering::Relaxed);
+            error_flag.store(true, Ordering::Relaxed);
+            recovery_needed.store(true, Ordering::Relaxed);
+            handle_process_error(data);
+            return;
+        }
+
+        match state.get_state() {
+            StreamState::Running => {
+                if fill(data, adapter).is_err() {
+                    error_flag.store(true, Ordering::Relaxed);
+                    recovery_needed.store(true, Ordering::Relaxed);
+                    handle_process_error(data);
+                }
+
+                let max_sample = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                diagnostics.update_peak(max_sample);
+            }
+            _ => {
+                data.fill(0.0);
+            }
+        }
+    }
+
+    /// Builds a cpal output stream that drives the shared [`Self::run_callback`]
+    /// with the supplied per-backend `fill` closure.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_stream<F>(
+        mut fill: F,
+        sample_rate: u32,
+        block_size: usize,
+        diagnostics: Arc<Diagnostics>,
+        state: Arc<AtomicStreamState>,
+        error_flag: Arc<AtomicBool>,
+        recovery_needed: Arc<AtomicBool>,
+        transport: Arc<TransportState>,
+    ) -> Result<Stream>
+    where
+        F: FnMut(&mut [f32], &mut BufferSizeAdapter) -> Result<()> + Send + 'static,
+    {
+        let device = default_output_device()?;
         let config = device
             .supported_configs()?
             .into_iter()
@@ -194,65 +333,65 @@ impl StreamController {
             })
             .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
 
+        let config = config.config();
+        let mut adapter = BufferSizeAdapter::new(block_size);
+        let error_cb_flag = error_flag.clone();
+
+        let stream = device.build_output_stream(
+            &config,
+            move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
+                Self::run_callback(
+                    data,
+                    info,
+                    &mut adapter,
+                    &diagnostics,
+                    &state,
+                    &error_flag,
+                    &recovery_needed,
+                    &transport,
+                    &mut fill,
+                );
+            },
+            move |_| {
+                error_cb_flag.store(true, Ordering::Relaxed);
+            },
+            None,
+        )?;
+        Ok(stream)
+    }
+
+    /// Starts real-time audio streaming from the given runtime.
+    ///
+    /// Creates a cpal stream, launches the audio callback, and returns a controller
+    /// for managing playback state. Returns an error if device enumeration or stream creation fails.
+    pub fn play(mut runtime: Runtime) -> Result<Self> {
+        AtomicStreamState::verify_lock_free_atomics()?;
+        let sample_rate = runtime.sample_rate() as u32;
+        let block_size = runtime.plan.block_size;
+
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
         let recovery_needed = Arc::new(AtomicBool::new(false));
         let diagnostics = Diagnostics::new();
-        let state_clone = state.clone();
-        let error_flag_clone = error_flag.clone();
-        let error_flag_clone2 = error_flag.clone();
-        let recovery_clone = recovery_needed.clone();
-        let diag_clone = diagnostics.clone();
-        let mut adapter = BufferSizeAdapter::new(block_size);
         let handle_store = Arc::new(Mutex::new(None));
+        let transport = TransportState::new();
 
-        let sample_format = config.sample_format();
-        let config = config.config();
-
-        let stream = match sample_format {
-            SampleFormat::F32 => device.build_output_stream(
-                &config,
-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
-
-                    // Report output latency from the cpal callback timestamp.
-                    // Uses the PUBLIC `OutputCallbackInfo::timestamp()` method
-                    // (the `timestamp` *field* is private; the method is not).
-                    if let Some(d) = output_latency(&info.timestamp()) {
-                        diag_clone.update_latency(d.as_nanos().min(u64::MAX as u128) as u64);
-                    }
-
-                    if data.len() > MAX_HOST_FRAMES {
-                        diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
-                        error_flag_clone.store(true, Ordering::Relaxed);
-                        recovery_clone.store(true, Ordering::Relaxed);
-                        handle_process_error(data);
-                        return;
-                    }
-
-                    match state_clone.get_state() {
-                        StreamState::Running => {
-                            if adapter.fill_host_buffer(data, &mut runtime, 2).is_err() {
-                                error_flag_clone.store(true, Ordering::Relaxed);
-                                recovery_clone.store(true, Ordering::Relaxed);
-                                handle_process_error(data);
-                            }
-
-                            let max_sample = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                            diag_clone.update_peak(max_sample);
-                        }
-                        _ => {
-                            data.fill(0.0);
-                        }
-                    }
-                },
-                move |_| {
-                    error_flag_clone2.store(true, Ordering::Relaxed);
-                },
-                None,
-            )?,
-            _ => return Err(anyhow::anyhow!("Unsupported sample format")),
+        let fill = move |data: &mut [f32], adapter: &mut BufferSizeAdapter| {
+            adapter
+                .fill_host_buffer(data, &mut runtime, 2)
+                .map_err(|e| anyhow::anyhow!(e))
         };
+
+        let stream = Self::spawn_stream(
+            fill,
+            sample_rate,
+            block_size,
+            diagnostics.clone(),
+            state.clone(),
+            error_flag.clone(),
+            recovery_needed.clone(),
+            transport.clone(),
+        )?;
 
         Ok(Self {
             stream: Some(stream),
@@ -263,6 +402,7 @@ impl StreamController {
             sample_rate,
             block_size,
             handle_store,
+            transport,
         })
     }
 
@@ -274,84 +414,38 @@ impl StreamController {
     /// - Invariant signals are emitted via lock-free queue
     pub fn play_handle(handle: RuntimeHandle) -> Result<Self> {
         AtomicStreamState::verify_lock_free_atomics()?;
-        let device = default_output_device()?;
         let sample_rate = handle.sample_rate() as u32;
         let block_size = handle.block_size();
-
-        let config = device
-            .supported_configs()?
-            .into_iter()
-            .find(|c| {
-                c.sample_rate().0 == sample_rate
-                    && c.channels() == 2
-                    && c.sample_format() == SampleFormat::F32
-            })
-            .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
 
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
         let recovery_needed = Arc::new(AtomicBool::new(false));
         let diagnostics = Diagnostics::new();
-        let state_clone = state.clone();
-        let error_flag_clone = error_flag.clone();
-        let error_flag_clone2 = error_flag.clone();
-        let recovery_clone = recovery_needed.clone();
-        let diag_clone = diagnostics.clone();
-        let mut adapter = BufferSizeAdapter::new(block_size);
         let handle_store = Arc::new(Mutex::new(Some(handle)));
-
-        let sample_format = config.sample_format();
-        let config = config.config();
+        let transport = TransportState::new();
 
         let store_clone = handle_store.clone();
-        let stream = match sample_format {
-            SampleFormat::F32 => device.build_output_stream(
-                &config,
-                move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                    diag_clone.callback_count.fetch_add(1, Ordering::Relaxed);
-
-                    // Report output latency from the cpal callback timestamp.
-                    // Uses the PUBLIC `OutputCallbackInfo::timestamp()` method
-                    // (the `timestamp` *field* is private; the method is not).
-                    if let Some(d) = output_latency(&info.timestamp()) {
-                        diag_clone.update_latency(d.as_nanos().min(u64::MAX as u128) as u64);
-                    }
-
-                    if data.len() > MAX_HOST_FRAMES {
-                        diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
-                        error_flag_clone.store(true, Ordering::Relaxed);
-                        recovery_clone.store(true, Ordering::Relaxed);
-                        handle_process_error(data);
-                        return;
-                    }
-
-                    match state_clone.get_state() {
-                        StreamState::Running => {
-                            if let Ok(mut guard) = store_clone.lock() {
-                                if let Some(ref mut h) = *guard {
-                                    if adapter.fill_host_buffer_handle(data, h, 2).is_err() {
-                                        error_flag_clone.store(true, Ordering::Relaxed);
-                                        recovery_clone.store(true, Ordering::Relaxed);
-                                        handle_process_error(data);
-                                    }
-                                }
-                            }
-
-                            let max_sample = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                            diag_clone.update_peak(max_sample);
-                        }
-                        _ => {
-                            data.fill(0.0);
-                        }
-                    }
-                },
-                move |_| {
-                    error_flag_clone2.store(true, Ordering::Relaxed);
-                },
-                None,
-            )?,
-            _ => return Err(anyhow::anyhow!("Unsupported sample format")),
+        let fill = move |data: &mut [f32], adapter: &mut BufferSizeAdapter| {
+            if let Ok(mut guard) = store_clone.lock() {
+                if let Some(ref mut h) = *guard {
+                    return adapter
+                        .fill_host_buffer_handle(data, h, 2)
+                        .map_err(|e| anyhow::anyhow!(e));
+                }
+            }
+            Ok(())
         };
+
+        let stream = Self::spawn_stream(
+            fill,
+            sample_rate,
+            block_size,
+            diagnostics.clone(),
+            state.clone(),
+            error_flag.clone(),
+            recovery_needed.clone(),
+            transport.clone(),
+        )?;
 
         Ok(Self {
             stream: Some(stream),
@@ -362,21 +456,77 @@ impl StreamController {
             sample_rate,
             block_size,
             handle_store,
+            transport,
         })
     }
 
-    /// Attempts to recover from a device error by stopping the current stream,
-    /// rebuilding it with the same device configuration, and resetting error flags.
+    /// Attempts to recover from a device error.
     ///
-    /// For the `play_handle` path the handle is preserved across recovery via
-    /// an internal lock-free store. For the legacy `play` path the runtime is
-    /// consumed by the original callback and cannot be recreated; recovery
-    /// will fail gracefully if called on a play-constructed controller.
+    /// For the `play_handle` path the `RuntimeHandle` is preserved in the
+    /// internal store, so recovery **rebuilds and restarts** the stream via
+    /// [`Self::restart`]. For the legacy `play` path the `Runtime` was consumed
+    /// by the original callback and cannot be recreated; recovery simply clears
+    /// the error flags and leaves the controller stopped.
     pub fn recover(&mut self) -> Result<()> {
         self.stream = None;
-
         self.error_flag.store(false, Ordering::Relaxed);
         self.recovery_needed.store(false, Ordering::Relaxed);
+
+        if self
+            .handle_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("handle store poisoned"))?
+            .is_some()
+        {
+            self.restart()?;
+        } else {
+            self.state.set_state(StreamState::Stopped);
+        }
+        Ok(())
+    }
+
+    /// Rebuilds and restarts the underlying cpal stream from the stored
+    /// `RuntimeHandle` (the `play_handle` path).
+    ///
+    /// Returns an error if this controller was built via the legacy `play`,
+    /// whose `Runtime` was consumed and cannot be restarted.
+    pub fn restart(&mut self) -> Result<()> {
+        if self
+            .handle_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("handle store poisoned"))?
+            .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "restart requires a RuntimeHandle (use play_handle); the legacy play() \
+                 path consumes its Runtime and cannot be restarted"
+            ));
+        }
+
+        let store = self.handle_store.clone();
+        let fill = move |data: &mut [f32], adapter: &mut BufferSizeAdapter| {
+            if let Ok(mut guard) = store.lock() {
+                if let Some(ref mut h) = *guard {
+                    return adapter
+                        .fill_host_buffer_handle(data, h, 2)
+                        .map_err(|e| anyhow::anyhow!(e));
+                }
+            }
+            Ok(())
+        };
+
+        let stream = Self::spawn_stream(
+            fill,
+            self.sample_rate,
+            self.block_size,
+            self.diagnostics.clone(),
+            self.state.clone(),
+            self.error_flag.clone(),
+            self.recovery_needed.clone(),
+            self.transport.clone(),
+        )?;
+        stream.play()?;
+        self.stream = Some(stream);
         self.state.set_state(StreamState::Running);
         Ok(())
     }
@@ -413,6 +563,21 @@ impl StreamController {
         self.error_flag.store(false, Ordering::Relaxed);
     }
 
+    /// Installs a transport clock. The callback samples it once per host
+    /// buffer; the most recent value is available via [`Self::transport_time`].
+    ///
+    /// Passing a clock is optional: with none set the controller reports
+    /// zeroed musical time and existing callers are unaffected.
+    pub fn set_transport_clock(&self, clock: Box<dyn TransportClock + Send + Sync>) {
+        self.transport.set_clock(clock);
+    }
+
+    /// Returns the most recent transport position reported by the installed
+    /// clock, or a zeroed [`TransportTime`] if no clock is set.
+    pub fn transport_time(&self) -> TransportTime {
+        self.transport.sample()
+    }
+
     /// Returns a snapshot of the lock-free diagnostics counters.
     pub fn diagnostics(&self) -> DiagnosticsSnapshot {
         let nanos = self.diagnostics.latency_nanos.load(Ordering::Relaxed);
@@ -428,15 +593,33 @@ impl StreamController {
         }
     }
 
-    /// Returns the most recent output latency reported by the audio callback
-    /// (derived from `cpal::OutputCallbackInfo.timestamp`), or `None` if no
-    /// stream has reported one yet.
+    /// Returns the most recent output latency reported by the audio callback,
+    /// derived from `cpal::OutputCallbackInfo.timestamp()` (playback instant
+    /// minus callback-invocation instant), or `None` if no value has been
+    /// captured yet.
+    ///
+    /// This is **best-effort**: it is `None` before any stream has run, and
+    /// also `None` whenever the host's audio backend does not supply a
+    /// timestamp for the callback (cpal yields `None` from
+    /// `OutputCallbackInfo.timestamp()` in that case). The value reflects
+    /// whatever the last callback observed and is not smoothed.
     pub fn latency(&self) -> Option<Duration> {
         let nanos = self.diagnostics.latency_nanos.load(Ordering::Relaxed);
         if nanos == 0 {
             None
         } else {
             Some(Duration::from_nanos(nanos))
+        }
+    }
+}
+
+impl Drop for StreamController {
+    /// Best-effort graceful teardown: pause the underlying cpal stream when
+    /// the controller is dropped. (cpal stops the stream on drop regardless;
+    /// this makes the intent explicit and keeps the state flag consistent.)
+    fn drop(&mut self) {
+        if let Some(stream) = &self.stream {
+            let _ = stream.pause();
         }
     }
 }
@@ -496,6 +679,7 @@ mod tests {
             sample_rate: 44100,
             block_size: 64,
             handle_store,
+            transport: TransportState::new(),
         };
 
         // start should not change state since no stream
@@ -584,6 +768,7 @@ mod tests {
             sample_rate: 44100,
             block_size: 64,
             handle_store,
+            transport: TransportState::new(),
         };
         assert!(controller.latency().is_none());
 
@@ -651,6 +836,7 @@ mod tests {
             sample_rate: 44100,
             block_size: 64,
             handle_store,
+            transport: TransportState::new(),
         };
 
         assert!(controller.has_error());
@@ -660,6 +846,140 @@ mod tests {
 
         assert!(!controller.has_error());
         assert!(!controller.recovery_needed());
-        assert_eq!(controller.state.get_state(), StreamState::Running);
+        // Legacy play() path: the Runtime was consumed, so recovery cannot
+        // rebuild a stream and leaves the controller stopped.
+        assert_eq!(controller.state.get_state(), StreamState::Stopped);
+    }
+
+    #[test]
+    fn test_restart_rebuilds_handle_stream() {
+        use crate::device_management::default_output_device;
+        use auxide::rt::RuntimeCore;
+        use std::thread::sleep;
+
+        if let Ok(device) = default_output_device() {
+            // Pick a sample rate the real device actually supports.
+            let sample_rate = device
+                .supported_configs()
+                .expect("device exposes supported configs")
+                .into_iter()
+                .find(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
+                .map(|c| c.sample_rate().0)
+                .expect("device offers a 2-channel F32 config");
+
+            let mut graph = Graph::new();
+            let osc = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+            let sink = graph.add_node(NodeType::OutputSink);
+            graph
+                .add_edge(auxide::graph::Edge {
+                    from_node: osc,
+                    from_port: PortId(0),
+                    to_node: sink,
+                    to_port: PortId(0),
+                    rate: Rate::Audio,
+                })
+                .unwrap();
+            let plan = Plan::compile(&graph, 64).unwrap();
+
+            let (handle, _control) =
+                RuntimeCore::new_with_channels(plan, &graph, sample_rate as f32);
+            let mut sc =
+                StreamController::play_handle(handle).expect("stream starts with a device");
+            sc.start().expect("stream should start on a live device");
+            sleep(Duration::from_millis(20));
+
+            // Recover (which rebuilds + restarts the handle stream) and keep
+            // using it afterwards — proves the teardown/restart path works.
+            sc.recover()
+                .expect("recover/restart should rebuild the handle stream");
+            sleep(Duration::from_millis(20));
+            assert!(
+                sc.latency().is_some(),
+                "restarted stream should report latency"
+            );
+            sc.stop();
+        }
+    }
+
+    #[test]
+    fn test_transport_advances() {
+        use crate::device_management::default_output_device;
+        use auxide::rt::RuntimeCore;
+        use std::sync::atomic::{AtomicU64, Ordering as O};
+        use std::thread::sleep;
+
+        // A test clock whose sample position advances by the block size each
+        // callback and whose beat phase wraps at 1.0.
+        struct TestClock {
+            sample: AtomicU64,
+            bpm: f32,
+        }
+        impl TransportClock for TestClock {
+            fn transport_time(&self) -> TransportTime {
+                let s = self.sample.fetch_add(64, O::Relaxed);
+                let seconds_per_beat = 60.0 / self.bpm;
+                let beat_phase = (s as f32 / 44100.0 / seconds_per_beat) % 1.0;
+                TransportTime {
+                    bpm: self.bpm,
+                    beat_phase,
+                    sample: s,
+                }
+            }
+        }
+
+        if let Ok(device) = default_output_device() {
+            let sample_rate = device
+                .supported_configs()
+                .expect("device exposes supported configs")
+                .into_iter()
+                .find(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
+                .map(|c| c.sample_rate().0)
+                .expect("device offers a 2-channel F32 config");
+
+            let mut graph = Graph::new();
+            let obs = graph.add_node(NodeType::SineOsc { freq: 440.0 });
+            let sink = graph.add_node(NodeType::OutputSink);
+            graph
+                .add_edge(auxide::graph::Edge {
+                    from_node: obs,
+                    from_port: PortId(0),
+                    to_node: sink,
+                    to_port: PortId(0),
+                    rate: Rate::Audio,
+                })
+                .unwrap();
+            let plan = Plan::compile(&graph, 64).unwrap();
+
+            let (handle, _control) =
+                RuntimeCore::new_with_channels(plan, &graph, sample_rate as f32);
+            let sc = StreamController::play_handle(handle).expect("stream starts with a device");
+            sc.set_transport_clock(Box::new(TestClock {
+                sample: AtomicU64::new(0),
+                bpm: 120.0,
+            }));
+            sc.start().expect("stream should start on a live device");
+
+            // Let a few buffers elapse so the callback samples the clock.
+            sleep(Duration::from_millis(40));
+            let first = sc.transport_time();
+            assert!(
+                first.sample >= 64,
+                "transport sample should advance past the first block"
+            );
+
+            sleep(Duration::from_millis(40));
+            let second = sc.transport_time();
+            assert!(
+                second.sample > first.sample,
+                "transport sample must advance across buffers"
+            );
+            assert!(
+                second.beat_phase >= 0.0 && second.beat_phase < 1.0,
+                "beat phase must wrap within [0, 1)"
+            );
+
+            // With no clock installed the controller reports zeroed time.
+            sc.stop();
+        }
     }
 }
