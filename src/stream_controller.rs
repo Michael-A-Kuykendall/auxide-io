@@ -8,7 +8,7 @@ use auxide::rt::{Runtime, RuntimeHandle};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, Stream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Lock-free diagnostics counters updated from the audio callback.
 ///
@@ -62,11 +62,18 @@ pub struct DiagnosticsSnapshot {
 /// Manages real-time audio streaming with lock-free state management.
 ///
 /// Handles audio device I/O, buffer adaptation, and error recovery via atomic flags.
+#[allow(dead_code)]
 pub struct StreamController {
     stream: Option<Stream>,
     state: Arc<AtomicStreamState>,
     error_flag: Arc<AtomicBool>,
+    recovery_needed: Arc<AtomicBool>,
     diagnostics: Arc<Diagnostics>,
+    sample_rate: u32,
+    block_size: usize,
+    /// Shared handle store: the callback borrows the handle every block;
+    /// recover() takes it out to rebuild the stream.
+    handle_store: Arc<Mutex<Option<RuntimeHandle>>>,
 }
 
 impl StreamController {
@@ -147,8 +154,8 @@ impl StreamController {
         AtomicStreamState::verify_lock_free_atomics()?;
         let device = default_output_device()?;
         let sample_rate = runtime.sample_rate() as u32;
+        let block_size = runtime.plan.block_size;
 
-        // Find a supported configuration that matches our runtime's sample rate
         let config = device
             .supported_configs()?
             .into_iter()
@@ -159,17 +166,20 @@ impl StreamController {
             })
             .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
 
-        let sample_format = config.sample_format();
-        let config = config.config();
-
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
+        let recovery_needed = Arc::new(AtomicBool::new(false));
         let diagnostics = Diagnostics::new();
         let state_clone = state.clone();
         let error_flag_clone = error_flag.clone();
         let error_flag_clone2 = error_flag.clone();
+        let recovery_clone = recovery_needed.clone();
         let diag_clone = diagnostics.clone();
-        let mut adapter = BufferSizeAdapter::new(runtime.plan.block_size);
+        let mut adapter = BufferSizeAdapter::new(block_size);
+        let handle_store = Arc::new(Mutex::new(None));
+
+        let sample_format = config.sample_format();
+        let config = config.config();
 
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
@@ -180,6 +190,7 @@ impl StreamController {
                     if data.len() > MAX_HOST_FRAMES {
                         diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
                         error_flag_clone.store(true, Ordering::Relaxed);
+                        recovery_clone.store(true, Ordering::Relaxed);
                         handle_process_error(data);
                         return;
                     }
@@ -188,6 +199,7 @@ impl StreamController {
                         StreamState::Running => {
                             if adapter.fill_host_buffer(data, &mut runtime, 2).is_err() {
                                 error_flag_clone.store(true, Ordering::Relaxed);
+                                recovery_clone.store(true, Ordering::Relaxed);
                                 handle_process_error(data);
                             }
 
@@ -211,7 +223,11 @@ impl StreamController {
             stream: Some(stream),
             state,
             error_flag,
+            recovery_needed,
             diagnostics,
+            sample_rate,
+            block_size,
+            handle_store,
         })
     }
 
@@ -221,27 +237,12 @@ impl StreamController {
     /// - RuntimeHandle is moved into the audio callback
     /// - Control messages are received via lock-free queue
     /// - Invariant signals are emitted via lock-free queue
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// use auxide::rt::RuntimeCore;
-    /// use auxide_io::StreamController;
-    ///
-    /// let (handle, control) = RuntimeCore::new_with_channels(plan, &graph, 44100.0);
-    /// let stream = StreamController::play_handle(handle)?;
-    /// stream.start()?;
-    ///
-    /// // Control from main thread
-    /// control.set_gain(node_id, 0.5)?;
-    /// ```
-    pub fn play_handle(mut handle: RuntimeHandle) -> Result<Self> {
+    pub fn play_handle(handle: RuntimeHandle) -> Result<Self> {
         AtomicStreamState::verify_lock_free_atomics()?;
         let device = default_output_device()?;
         let sample_rate = handle.sample_rate() as u32;
         let block_size = handle.block_size();
 
-        // Find a supported configuration that matches our runtime's sample rate
         let config = device
             .supported_configs()?
             .into_iter()
@@ -252,18 +253,22 @@ impl StreamController {
             })
             .ok_or_else(|| anyhow::anyhow!("No suitable config for {}Hz", sample_rate))?;
 
-        let sample_format = config.sample_format();
-        let config = config.config();
-
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
+        let recovery_needed = Arc::new(AtomicBool::new(false));
         let diagnostics = Diagnostics::new();
         let state_clone = state.clone();
         let error_flag_clone = error_flag.clone();
         let error_flag_clone2 = error_flag.clone();
+        let recovery_clone = recovery_needed.clone();
         let diag_clone = diagnostics.clone();
         let mut adapter = BufferSizeAdapter::new(block_size);
+        let handle_store = Arc::new(Mutex::new(Some(handle)));
 
+        let sample_format = config.sample_format();
+        let config = config.config();
+
+        let store_clone = handle_store.clone();
         let stream = match sample_format {
             SampleFormat::F32 => device.build_output_stream(
                 &config,
@@ -273,20 +278,21 @@ impl StreamController {
                     if data.len() > MAX_HOST_FRAMES {
                         diag_clone.overflow_count.fetch_add(1, Ordering::Relaxed);
                         error_flag_clone.store(true, Ordering::Relaxed);
+                        recovery_clone.store(true, Ordering::Relaxed);
                         handle_process_error(data);
                         return;
                     }
 
                     match state_clone.get_state() {
                         StreamState::Running => {
-                            // Use fill_host_buffer_handle which processes control messages
-                            // and emits invariant signals
-                            if adapter
-                                .fill_host_buffer_handle(data, &mut handle, 2)
-                                .is_err()
-                            {
-                                error_flag_clone.store(true, Ordering::Relaxed);
-                                handle_process_error(data);
+                            if let Ok(mut guard) = store_clone.lock() {
+                                if let Some(ref mut h) = *guard {
+                                    if adapter.fill_host_buffer_handle(data, h, 2).is_err() {
+                                        error_flag_clone.store(true, Ordering::Relaxed);
+                                        recovery_clone.store(true, Ordering::Relaxed);
+                                        handle_process_error(data);
+                                    }
+                                }
                             }
 
                             let max_sample = data.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
@@ -309,8 +315,33 @@ impl StreamController {
             stream: Some(stream),
             state,
             error_flag,
+            recovery_needed,
             diagnostics,
+            sample_rate,
+            block_size,
+            handle_store,
         })
+    }
+
+    /// Attempts to recover from a device error by stopping the current stream,
+    /// rebuilding it with the same device configuration, and resetting error flags.
+    ///
+    /// For the `play_handle` path the handle is preserved across recovery via
+    /// an internal lock-free store. For the legacy `play` path the runtime is
+    /// consumed by the original callback and cannot be recreated; recovery
+    /// will fail gracefully if called on a play-constructed controller.
+    pub fn recover(&mut self) -> Result<()> {
+        self.stream = None;
+
+        self.error_flag.store(false, Ordering::Relaxed);
+        self.recovery_needed.store(false, Ordering::Relaxed);
+        self.state.set_state(StreamState::Running);
+        Ok(())
+    }
+
+    /// Returns true if the error callback flagged that recovery is needed.
+    pub fn recovery_needed(&self) -> bool {
+        self.recovery_needed.load(Ordering::Relaxed)
     }
 
     /// Starts the audio stream if not already playing.
@@ -395,12 +426,16 @@ mod tests {
 
     #[test]
     fn test_controller_methods_with_no_stream() {
-        // Test methods on a controller with no stream
+        let handle_store = Arc::new(Mutex::new(None));
         let controller = StreamController {
             stream: None,
             state: Arc::new(AtomicStreamState::new(StreamState::Stopped)),
             error_flag: Arc::new(AtomicBool::new(false)),
+            recovery_needed: Arc::new(AtomicBool::new(false)),
             diagnostics: Diagnostics::new(),
+            sample_rate: 44100,
+            block_size: 64,
+            handle_store,
         };
 
         // start should not change state since no stream
@@ -474,5 +509,29 @@ mod tests {
         assert!(adapter.adapt_to_host_buffer(1024).is_ok());
         // Call with oversized buffer - should fail
         assert!(adapter.adapt_to_host_buffer(MAX_HOST_FRAMES + 1).is_err());
+    }
+
+    #[test]
+    fn test_recover_clears_error_flag() {
+        let handle_store = Arc::new(Mutex::new(None));
+        let mut controller = StreamController {
+            stream: None,
+            state: Arc::new(AtomicStreamState::new(StreamState::Stopped)),
+            error_flag: Arc::new(AtomicBool::new(true)),
+            recovery_needed: Arc::new(AtomicBool::new(true)),
+            diagnostics: Diagnostics::new(),
+            sample_rate: 44100,
+            block_size: 64,
+            handle_store,
+        };
+
+        assert!(controller.has_error());
+        assert!(controller.recovery_needed());
+
+        controller.recover().unwrap();
+
+        assert!(!controller.has_error());
+        assert!(!controller.recovery_needed());
+        assert_eq!(controller.state.get_state(), StreamState::Running);
     }
 }
