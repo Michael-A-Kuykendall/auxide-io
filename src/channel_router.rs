@@ -73,8 +73,10 @@ mod tests {
     #[test]
     fn test_routing_alloc() {
         // RT-safety: These functions only operate on pre-allocated buffers
-        // No heap allocations occur in the audio path
-        // This is verified by the #[forbid(alloc)] in the crate root
+        // and perform no heap allocations on the audio path. (Note: the crate
+        // does NOT claim `#[forbid(alloc)]` in the root — cpal/host audio
+        // paths may allocate on some platforms — so the guarantee here is
+        // "no allocation introduced by channel_router itself".)
     }
 
     #[test]
