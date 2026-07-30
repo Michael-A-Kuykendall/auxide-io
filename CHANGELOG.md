@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.3] - 2026-07-29
+- **Glitch detection**: Added glitch_count to Diagnostics for real-time buffer underflow tracking
+- **BufferSizeAdapter**: Added with_diagnostics method; all stream paths (output_core, play_duplex, restart) wire shared glitch counting
+- **Ecosystem docs**: Updated AGENTS.md with full 7-crate Auxide ecosystem overview
+
 ## [0.1.2] - 2026-01-07
 - **Documentation improvements**: Complete crate-level and module documentation
 - **Error handling enhancements**: Improved error messages for better debugging

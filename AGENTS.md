@@ -13,6 +13,61 @@ This project demands **the best possible work at all times**. Every acceptance c
 
 This project is built by someone who cares deeply about quality. Match that standard.
 
+## 🗺️ Auxide ecosystem — 7-CRATE SYSTEM (read before touching code)
+
+Auxide is **seven separate GitHub repos** under `github.com/Michael-A-Kuykendall/`,
+not a single crate or workspace. Each crate is its own repo, cloned as a sibling
+directory, and linked in dev via Cargo **path dependencies**. There is NO
+`[workspace]` aggregator — do NOT merge them.
+
+**You are here: `auxide-io`** — Audio device I/O (stream, recovery, devices).
+Depends on `auxide` (kernel) only.
+
+| Crate | Role | Status |
+|-------|------|--------|
+| `auxide` | Kernel: graph/plan/runtime + control contract | active |
+| `auxide-dsp` | DSP UGens (osc/filters/FX/env/mod) | active |
+| `auxide-io` | Audio device I/O (stream, recovery, devices) | active |
+| `auxide-midi` | MIDI bridge + ROMpler/graph consumers | active |
+| `auxide-server` | Live, multi-instance, addressable node-graph server | exists (scaffolded) |
+| `auxide-proto` | Wire protocol + client (OSC + WebSocket codecs) | exists (scaffolded) |
+| `auxide-conductor` | Composition / scheduling / transport | exists (scaffolded) |
+
+### Dependency direction
+
+```
+auxide  ──▶  (kernel, depends on nothing internal)
+  ▲  ▲  ▲
+  │  │  └── auxide-midi
+  │  └───── auxide-io      ◀── you are here
+  └──────── auxide-dsp
+                │
+                ▼
+          auxide-server   (depends on auxide + dsp + io + midi)
+                │
+                ▼
+          auxide-conductor (depends on auxide-server)
+                │
+                ▼
+          auxide-proto  (codecs for server/conductor messages)
+```
+
+### Local dev tree
+
+```
+repos/
+  auxide/            (kernel)
+  auxide-dsp/
+  auxide-io/         ← you are here
+  auxide-midi/
+  auxide-server/
+  auxide-proto/
+  auxide-conductor/
+```
+
+All seven repos are siblings under `C:\Users\micha\repos`. Work in the correct
+crate's repo; never assume code you need lives in this one.
+
 ---
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.

@@ -9,7 +9,9 @@
 use auxide::graph::{Graph, NodeType, PortId, Rate};
 use auxide::plan::Plan;
 use auxide::rt::RuntimeCore;
-use auxide_io::{ChannelMap, Recorder, SharedRecorder, StreamController, TransportClock, TransportTime};
+use auxide_io::{
+    ChannelMap, Recorder, SharedRecorder, StreamController, TransportClock, TransportTime,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

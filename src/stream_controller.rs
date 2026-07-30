@@ -19,6 +19,8 @@ pub struct Diagnostics {
     pub overflow_count: AtomicUsize,
     pub peak: AtomicU32,
     pub latency_nanos: AtomicU64,
+    /// Count of buffer underflow glitches from the size adapter.
+    pub glitch_count: AtomicU64,
 }
 
 impl Diagnostics {
@@ -28,6 +30,7 @@ impl Diagnostics {
             overflow_count: AtomicUsize::new(0),
             peak: AtomicU32::new(0),
             latency_nanos: AtomicU64::new(0),
+            glitch_count: AtomicU64::new(0),
         })
     }
 
@@ -63,6 +66,8 @@ pub struct DiagnosticsSnapshot {
     pub overflow_count: usize,
     pub peak: f32,
     pub latency: Option<Duration>,
+    /// Number of buffer underflow glitches since stream start.
+    pub glitch_count: u64,
 }
 
 /// A point in musical time, sampled once per host buffer.
@@ -337,12 +342,10 @@ impl StreamController {
             })
             .or_else(|| {
                 let d = device.clone();
-                d.supported_input_configs()
-                    .ok()
-                    .and_then(|it| {
-                        it.map(|r| r.with_max_sample_rate())
-                            .find(|c| c.sample_format() == SampleFormat::F32)
-                    })
+                d.supported_input_configs().ok().and_then(|it| {
+                    it.map(|r| r.with_max_sample_rate())
+                        .find(|c| c.sample_format() == SampleFormat::F32)
+                })
             })
             .ok_or_else(|| anyhow::anyhow!("No suitable input config"))?
             .config();
@@ -379,10 +382,11 @@ impl StreamController {
         let device_rate = Self::get_best_sample_rate(runtime_rate as f32)
             .map(|r| r as u32)
             .unwrap_or(runtime_rate);
+        let diagnostics = Diagnostics::new();
         let adapter = BufferSizeAdapter::new(block_size)
             .with_channel_map(channel_map.clone())
-            .with_resampling(runtime_rate, device_rate);
-        let diagnostics = Diagnostics::new();
+            .with_resampling(runtime_rate, device_rate)
+            .with_diagnostics(diagnostics.clone());
         let state = Arc::new(AtomicStreamState::new(StreamState::Stopped));
         let error_flag = Arc::new(AtomicBool::new(false));
         let recovery_needed = Arc::new(AtomicBool::new(false));
@@ -412,13 +416,6 @@ impl StreamController {
             handle_store,
             transport,
         })
-    }
-
-    /// Builds a fresh adapter from the controller's stored rates and channel map.
-    fn make_adapter(&self) -> BufferSizeAdapter {
-        BufferSizeAdapter::new(self.block_size)
-            .with_channel_map(self.channel_map.clone())
-            .with_resampling(self.runtime_rate, self.device_rate)
     }
 
     /// Starts real-time audio streaming from the given runtime (legacy path).
@@ -527,7 +524,10 @@ impl StreamController {
     }
 
     /// Like [`Self::play_handle`] but with an explicit channel map.
-    pub fn play_handle_with_channel_map(handle: RuntimeHandle, channel_map: ChannelMap) -> Result<Self> {
+    pub fn play_handle_with_channel_map(
+        handle: RuntimeHandle,
+        channel_map: ChannelMap,
+    ) -> Result<Self> {
         let device = default_output_device()?;
         let runtime_rate = handle.sample_rate() as u32;
         let block_size = handle.block_size();
@@ -639,10 +639,11 @@ impl StreamController {
         let device_rate = Self::get_best_sample_rate(runtime_rate as f32)
             .map(|r| r as u32)
             .unwrap_or(runtime_rate);
+        let diagnostics = Diagnostics::new();
         let adapter = BufferSizeAdapter::new(block_size)
             .with_channel_map(ChannelMap::default())
-            .with_resampling(runtime_rate, device_rate);
-        let diagnostics = Diagnostics::new();
+            .with_resampling(runtime_rate, device_rate)
+            .with_diagnostics(diagnostics.clone());
         let state = Arc::new(AtomicStreamState::new(StreamState::Running));
         let error_flag = Arc::new(AtomicBool::new(false));
         let recovery_needed = Arc::new(AtomicBool::new(false));
@@ -731,7 +732,10 @@ impl StreamController {
             }
             Ok(())
         };
-        let adapter = self.make_adapter();
+        let adapter = BufferSizeAdapter::new(self.block_size)
+            .with_channel_map(self.channel_map.clone())
+            .with_resampling(self.runtime_rate, self.device_rate)
+            .with_diagnostics(self.diagnostics.clone());
         let device = default_output_device()?;
         let stream = Self::build_output_stream(
             device,
@@ -820,6 +824,7 @@ impl StreamController {
             } else {
                 Some(Duration::from_nanos(nanos))
             },
+            glitch_count: self.diagnostics.glitch_count.load(Ordering::Relaxed),
         }
     }
 
@@ -837,8 +842,7 @@ impl StreamController {
 
 impl Drop for StreamController {
     fn drop(&mut self) {
-        if let Some(stream) = 
-        &self.stream {
+        if let Some(stream) = &self.stream {
             let _ = stream.pause();
         }
     }
@@ -908,7 +912,10 @@ mod tests {
         if crate::device_management::default_output_device().is_ok() {
             assert!(result.is_ok(), "play should succeed when a device exists");
         } else {
-            assert!(result.is_err(), "play should fail gracefully without a device");
+            assert!(
+                result.is_err(),
+                "play should fail gracefully without a device"
+            );
         }
     }
 
@@ -1095,7 +1102,10 @@ mod tests {
             assert!(first.sample >= 64, "transport sample should advance");
             sleep(Duration::from_millis(40));
             let second = sc.transport_time();
-            assert!(second.sample > first.sample, "transport sample must advance");
+            assert!(
+                second.sample > first.sample,
+                "transport sample must advance"
+            );
             sc.stop();
         }
     }
@@ -1161,12 +1171,9 @@ mod tests {
                 .expect("rate");
 
             let recorder: SharedRecorder = Arc::new(Mutex::new(Recorder::new(sample_rate, 2)));
-            if let Ok(sc) = StreamController::play_input(
-                device.clone(),
-                sample_rate,
-                2,
-                recorder.clone(),
-            ) {
+            if let Ok(sc) =
+                StreamController::play_input(device.clone(), sample_rate, 2, recorder.clone())
+            {
                 sc.start().expect("start input");
                 sleep(Duration::from_millis(30));
                 assert!(

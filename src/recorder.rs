@@ -93,10 +93,7 @@ mod tests {
         let mut rec = Recorder::new(48000, 2);
         rec.push_block(&[0.1, 0.2, 0.3, 0.4]);
         rec.push_block(&[0.5, 0.6, 0.7, 0.8]);
-        assert_eq!(
-            rec.samples(),
-            &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
-        );
+        assert_eq!(rec.samples(), &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]);
         assert_eq!(rec.len_frames(), 4);
     }
 }

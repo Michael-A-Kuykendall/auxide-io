@@ -8,7 +8,9 @@
 
 use crate::channel_router::ChannelMap;
 use crate::resampler::LinearResampler;
+use crate::stream_controller::Diagnostics;
 use auxide::rt::{Runtime, RuntimeHandle};
+use std::sync::Arc;
 
 pub const MAX_HOST_FRAMES: usize = 16384;
 
@@ -35,6 +37,7 @@ pub struct BufferSizeAdapter {
     resample_out: Vec<f32>,
     /// Count of underflow glitches observed while filling host buffers.
     glitch_count: u64,
+    diagnostics: Option<Arc<Diagnostics>>,
 }
 
 impl BufferSizeAdapter {
@@ -55,6 +58,7 @@ impl BufferSizeAdapter {
             resample_in: vec![0.0; MAX_HOST_FRAMES * 8 + runtime_block_size],
             resample_out: vec![0.0; MAX_HOST_FRAMES + runtime_block_size],
             glitch_count: 0,
+            diagnostics: None,
         }
     }
 
@@ -69,9 +73,18 @@ impl BufferSizeAdapter {
     /// used instead).
     pub fn with_resampling(mut self, input_rate: u32, output_rate: u32) -> Self {
         if input_rate != output_rate && input_rate > 0 && output_rate > 0 {
-            self.resampler =
-                Some(LinearResampler::new(input_rate, output_rate, self.runtime_block_size));
+            self.resampler = Some(LinearResampler::new(
+                input_rate,
+                output_rate,
+                self.runtime_block_size,
+            ));
         }
+        self
+    }
+
+    /// Attaches the shared diagnostics for real-time glitch tracking.
+    pub fn with_diagnostics(mut self, diag: Arc<Diagnostics>) -> Self {
+        self.diagnostics = Some(diag);
         self
     }
 
@@ -141,8 +154,10 @@ impl BufferSizeAdapter {
             for c in 0..channels {
                 host_buffer[base + c] = 0.0;
             }
-            self.channel_map
-                .apply(self.resample_out[f], &mut host_buffer[base..base + channels]);
+            self.channel_map.apply(
+                self.resample_out[f],
+                &mut host_buffer[base..base + channels],
+            );
         }
         Ok(())
     }
@@ -168,6 +183,10 @@ impl BufferSizeAdapter {
                 }
                 if self.available() < 1 {
                     self.glitch_count += 1;
+                    if let Some(ref d) = self.diagnostics {
+                        d.glitch_count
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     host_buffer[frame * channels..].fill(0.0);
                     return Ok(());
                 }
@@ -260,7 +279,9 @@ mod tests {
         let mut runtime = make_runtime(44100.0);
         let mut adapter = BufferSizeAdapter::new(64);
         let mut buffer = vec![0.0; 128];
-        assert!(adapter.fill_host_buffer(&mut buffer, &mut runtime, 2).is_ok());
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 2)
+            .is_ok());
         assert!(
             buffer.iter().any(|&x| x != 0.0),
             "Buffer should contain non-zero audio samples"
@@ -287,7 +308,9 @@ mod tests {
         let mut runtime = make_runtime(44100.0);
         let mut adapter = BufferSizeAdapter::new(64);
         let mut buffer = vec![0.0; 2];
-        assert!(adapter.fill_host_buffer(&mut buffer, &mut runtime, 1).is_ok());
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 1)
+            .is_ok());
         assert!(buffer.iter().any(|&x| x != 0.0));
     }
 
@@ -296,7 +319,9 @@ mod tests {
         let mut runtime = make_runtime(44100.0);
         let mut adapter = BufferSizeAdapter::new(64);
         let mut buffer = vec![0.0; 1024];
-        assert!(adapter.fill_host_buffer(&mut buffer, &mut runtime, 1).is_ok());
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 1)
+            .is_ok());
         assert!(buffer.iter().any(|&x| x != 0.0));
     }
 
@@ -313,7 +338,9 @@ mod tests {
         let mut adapter = BufferSizeAdapter::new(64).with_channel_map(map);
         let mut runtime = make_runtime(44100.0);
         let mut buffer = vec![0.0; 16];
-        assert!(adapter.fill_host_buffer(&mut buffer, &mut runtime, 4).is_ok());
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 4)
+            .is_ok());
         // Mapped channel 3 must carry signal; all other channels stay silent.
         for f in 0..4usize {
             assert_eq!(buffer[f * 4], 0.0, "channel 0 must stay silent");
@@ -353,7 +380,9 @@ mod tests {
         let mut runtime = make_runtime(44100.0);
         let mut adapter = BufferSizeAdapter::new(64).with_resampling(44100, 48000);
         let mut buffer = vec![0.0; 512]; // 256 stereo frames at the device rate
-        assert!(adapter.fill_host_buffer(&mut buffer, &mut runtime, 2).is_ok());
+        assert!(adapter
+            .fill_host_buffer(&mut buffer, &mut runtime, 2)
+            .is_ok());
         assert!(
             buffer.iter().any(|&x| x != 0.0),
             "resampling path must still produce audio"
