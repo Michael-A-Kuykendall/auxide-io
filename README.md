@@ -1,3 +1,5 @@
+# auxide-io
+
 <img src="assets/auxide-io-logo.png" alt="Auxide IO Logo" width="400">
 
 [![Crates.io](https://img.shields.io/crates/v/auxide-io.svg)](https://crates.io/crates/auxide-io)
