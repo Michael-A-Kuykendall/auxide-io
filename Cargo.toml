@@ -4,7 +4,10 @@ version = "0.1.3"
 edition = "2021"
 description = "High-performance, real-time safe audio I/O layer for Auxide DSP graphs. Bridges deterministic audio processing to hardware output with buffer adaptation, channel routing, and cross-platform streaming via CPAL."
 license = "MIT"
+readme = "README.md"
 repository = "https://github.com/Michael-A-Kuykendall/auxide-io"
+homepage = "https://github.com/Michael-A-Kuykendall/auxide-io"
+documentation = "https://docs.rs/auxide-io"
 keywords = ["audio", "real-time", "cpal", "streaming", "dsp"]
 categories = ["multimedia::audio", "api-bindings"]
 
