@@ -42,7 +42,10 @@ auxide = "0.3"
 auxide-io = "0.2"
 ```
 
-A minimal, compiling example lives in [`examples/stream_example.rs`](examples/stream_example.rs). The short version:
+A minimal, compiling example lives in [`examples/stream_example.rs`](examples/stream_example.rs).
+
+<details>
+<summary>Expand: Live streaming with transport clock</summary>
 
 ```rust
 use auxide::graph::{Graph, NodeType, PortId, Rate};
@@ -78,6 +81,66 @@ fn main() -> anyhow::Result<()> {
     std::thread::sleep(Duration::from_millis(50));
     sc.stop();
     Ok(())
+}
+```
+</details>
+
+### Reading Diagnostics in Real-Time
+
+Monitor audio-thread health with lock-free counters:
+
+```rust
+let snap = controller.diagnostics();
+println!("cb={} overflow={} glitch={} peak={:.4} latency={:?}",
+    snap.callback_count, snap.overflow_count,
+    snap.glitch_count, snap.peak, snap.latency);
+```
+
+### Using ChannelMap for Custom Routing
+
+```rust
+use auxide_io::ChannelMap;
+
+// Route mono runtime output to left channel only
+let map = ChannelMap::Explicit(vec![(0usize, 0usize)]);
+let sc = StreamController::play_handle_with_channel_map(handle, map)?;
+
+// Default MonoToStereo sends to both channels
+let sc = StreamController::play_handle(handle)?; // MonoToStereo implicit
+```
+
+### Recording Input + Duplex
+
+```rust
+use auxide_io::Recorder;
+use std::sync::{Arc, Mutex};
+
+let recorder: Arc<Mutex<Recorder>> = Arc::new(Mutex::new(
+    Recorder::new(44100, 2)
+));
+
+// Input-only capture
+let sc = StreamController::play_input(device, 44100, 2, recorder.clone())?;
+
+// Or full duplex (output + input)
+let sc = StreamController::play_duplex(device, 44100, 2, recorder.clone(), runtime)?;
+
+// Export captured audio to WAV
+recorder.lock().unwrap().save_wav("capture.wav")?;
+```
+
+### Error Recovery (Handle Path)
+
+The `RuntimeHandle`-based constructors support recovery without rebuilding the graph:
+
+```rust
+fn run_loop(sc: &mut StreamController) {
+    loop {
+        if sc.recovery_needed() {
+            sc.recover().ok();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 ```
 
