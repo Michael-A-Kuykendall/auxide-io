@@ -1,5 +1,9 @@
 # auxide-io
 
+[![Trans rights](https://pride-badges.pony.workers.dev/static/v1?label=trans%20rights&stripeWidth=6&stripeColors=5BCEFA,F5A9B8,FFFFFF,F5A9B8,5BCEFA)](https://translifeline.org/)
+[![LGBTQ+ friendly](https://pride-badges.pony.workers.dev/static/v1?label=lgbtq%2B%20friendly&stripeWidth=6&stripeColors=E40303,FF8C00,FFED00,008026,24408E,732982)](https://www.thetrevorproject.org/)
+
+
 <img src="assets/auxide-io-logo.png" alt="Auxide IO Logo" width="400">
 
 [![Crates.io](https://img.shields.io/crates/v/auxide-io.svg)](https://crates.io/crates/auxide-io)
@@ -212,3 +216,14 @@ MIT License - forever and always.
 | [auxide-dsp](https://github.com/Michael-A-Kuykendall/auxide-dsp) | DSP nodes library | 0.2.1 |
 | **[auxide-io](https://github.com/Michael-A-Kuykendall/auxide-io)** | Audio I/O layer | 0.1.3 |
 | [auxide-midi](https://github.com/Michael-A-Kuykendall/auxide-midi) | MIDI integration | 0.1.2 |
+
+## Support
+
+This project is a safe space. Trans rights are human rights.
+
+If you or someone you love needs support:
+
+- [The Trevor Project](https://www.thetrevorproject.org/) — 24/7 for LGBTQ+ young people. Call 1-866-488-7386 or text START to 678-678
+- [Trans Lifeline](https://translifeline.org/) — peer support run by and for trans people. US: 877-565-8860
+- [988 Suicide & Crisis Lifeline](https://988lifeline.org/) — call or text 988
+
